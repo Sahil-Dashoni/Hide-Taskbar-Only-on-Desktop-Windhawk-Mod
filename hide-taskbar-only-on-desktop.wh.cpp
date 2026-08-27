@@ -4,7 +4,7 @@
 // @description     Hides the taskbar on the desktop, shows it for other windows or when you hover near the bottom edge
 // @version         1.0
 // @author          Sahil Dashoni
-// @github          https://github.com/Sahil-Dashoni/Hide-Taskbar-Only-on-Desktop-Windhawk-Mod
+// @github          https://github.com/Sahil-Dashoni
 // @include         explorer.exe
 // @compilerOptions -ldwmapi
 // ==/WindhawkMod==
