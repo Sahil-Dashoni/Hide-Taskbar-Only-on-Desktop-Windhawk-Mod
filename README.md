@@ -8,13 +8,13 @@ Each display is evaluated independently. An application on one display does not 
 
 ### Multiple Displays
 
-![Multiple Display](./Assets/Multiple%20Display.gif)
+![Multiple Display](./Assets/multiple-display.gif)
 
 Each selected display is evaluated independently. An application can keep one display's taskbar visible while another display remains in the desktop-only state.
 
 ### Single Display
 
-![Single Display](./Assets/Single%20Display.gif)
+![Single Display](./Assets/single-display.gif)
 
 The taskbar hides when the display returns to the desktop and can be revealed by moving the cursor into the configured bottom-edge area.
 
