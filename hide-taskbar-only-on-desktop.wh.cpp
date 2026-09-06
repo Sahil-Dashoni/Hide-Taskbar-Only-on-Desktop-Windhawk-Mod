@@ -2,7 +2,7 @@
 // @id              hide-taskbar-only-on-desktop
 // @name            Hide Taskbar Only on Desktop
 // @description     Hides selected taskbars only while their display is showing the desktop
-// @version         4.0.0
+// @version         5.0.0
 // @author          Sahil Dashoni
 // @github          https://github.com/Sahil-Dashoni
 // @include         windhawk.exe
@@ -12,168 +12,206 @@
 
 // ==WindhawkModReadme==
 /*
+
 # Hide Taskbar Only on Desktop
 
-Hides selected taskbars only while their own display is showing the desktop.
-When an application window is present on that display, the taskbar remains
-visible. Displays are evaluated independently.
+This Windhawk mod hides selected taskbars when their corresponding display is showing only the desktop, and shows them again when an application or relevant Windows shell interaction requires the taskbar.
 
-## Behavior
+Each display is evaluated independently. An application being open on one display does not prevent the taskbar on another selected display from hiding when that display is showing only the desktop.
 
-- A selected taskbar hides only when its display has no visible, non-minimized
-  application window.
-- Maximized windows use Windows' monitor assignment. Normal windows spanning
-  displays count on every display they intersect.
-- Bottom-edge hover reveal can be enabled independently per display.
-- The hover zone is based on the current taskbar height and display DPI, plus
-  the configured extra margin.
-- The hover reveal feature is limited to bottom-docked taskbars.
-- The configured post-hover delay applies to hover dismissal.
-- Relevant Windows shell surfaces such as Start, taskbar popups/overflow,
-  notification/Quick Settings, and supported Alt+Tab surfaces are treated as
-  shell UI rather than normal application windows.
-- Clearing the taskbar selection means no taskbar is hidden.
-- Windows' native taskbar auto-hide setting is not changed.
+## Demo
 
-## Why this is different from `taskbar-auto-hide-when-maximized`
+### Multiple Displays
 
-These mods answer different visibility questions.
+![Multiple Display](https://raw.githubusercontent.com/Sahil-Dashoni/Hide-Taskbar-Only-on-Desktop-Windhawk-Mod/refs/heads/main/Assets/multiple-display.gif)
 
-`taskbar-auto-hide-when-maximized` is based on the state of application
-windows, with modes such as `intersected`, `maximized`, and `never`. This mod is
-based on a different predicate: **is this display currently showing only the
-desktop?**
+### Single Display
 
-That means a normal, non-maximized application keeps the selected taskbar
-visible here. The taskbar hides only after the last visible, non-minimized
-application on that display is gone. A maximized window is not required for the
-taskbar to stay visible. Conversely, a completely idle display can hide its
-taskbar even while another display is actively being used.
+![Single Display](https://raw.githubusercontent.com/Sahil-Dashoni/Hide-Taskbar-Only-on-Desktop-Windhawk-Mod/refs/heads/main/Assets/single-display.gif)
 
-The distinction is therefore the user-visible policy, not merely the mechanism
-used internally:
+## How It Works
 
-| Scenario | This mod | `taskbar-auto-hide-when-maximized` |
-| --- | --- | --- |
-| Desktop only on a selected display | Hide taskbar | Depends on its selected window-state mode |
-| One normal, non-maximized app visible | Keep taskbar visible | Depends on mode/window state |
-| One display has an app, another is idle | Evaluate each display separately | Uses its own monitor/window-state policy |
-| Goal | Desktop-only taskbar visibility | Auto-hide driven by maximized/intersection state |
+For each selected display, the mod determines whether there is a visible, non-minimized application window associated with that display.
 
-This mod also deliberately leaves Windows' native auto-hide preference alone
-and implements the desktop-only rule directly, including its explicit
-per-display selection and configurable hover-dismiss behavior.
+When no relevant application window is present, the selected taskbar on that display can be hidden.
 
-The project remains standalone because its primary purpose is this specific
-desktop-only policy. The existing mod is still the better choice for users who
-want taskbar auto-hide tied to maximized/intersected window state.
+When an application becomes active on the display, or when a relevant Windows shell interaction requires the taskbar, it is shown again.
 
-## Per-display configuration
+The taskbar is hidden directly rather than enabling Windows' native taskbar auto-hide mode. The mod therefore does not intentionally change the Windows desktop work area when hiding the taskbar.
 
-You can independently choose:
+## Difference from Existing Taskbar Auto-Hide Mods
 
-- Which displays should hide their taskbar when desktop-only.
-- Which displays should allow bottom-edge hover reveal.
+This mod shares some concepts with existing taskbar auto-hide projects, but it is focused on a different user-visible behavior and implementation model.
 
-Selections use Windows display device names such as `\\.\DISPLAY1`. These
-identifiers may differ from the numbers shown in Windows Display Settings.
+**`taskbar-auto-hide-when-maximized`** primarily provides visibility modes based on application-window state, such as maximized or intersected windows. This mod uses a desktop-only predicate: a selected taskbar remains visible whenever its display has a visible, non-minimized application window and hides only when that display has no such application window.
 
-The mod tracks monitor identity during the current session so a reconnected
-display that receives a different `DISPLAYn` number can retain its selection
-when the same monitor identity is detected.
+This means the behavior is not limited to maximized, snapped, fullscreen, or taskbar-intersecting windows.
 
-## Hover reveal
+**`taskbar-auto-hide-per-monitor`** provides per-monitor control over Windows' native taskbar auto-hide behavior. This mod also allows displays to be configured independently, but it directly controls the taskbar window instead of changing Windows' native auto-hide state.
 
-When a selected, bottom-docked taskbar is hidden by the mod, moving the pointer
-into its configured bottom-edge zone reveals it. After leaving the zone, the
-taskbar remains visible for the configured dismissal delay before returning to
-its normal desktop/application state.
+**`taskbar-auto-hide-custom-activation-area`** changes the activation area used by Windows' native taskbar auto-hide behavior. This mod instead performs its own desktop/application-state detection and provides its own configurable bottom-edge hover area.
 
-Hover tracking is adaptive: it samples more frequently when a configured hover
-zone can matter, uses a slower idle interval otherwise, and backs off further
-when cursor queries repeatedly fail (for example on the secure desktop).
+The work-area behavior is also different. The mod directly hides the taskbar window without intentionally modifying the Windows desktop work area.
 
-## Windows shell interactions
+The combination of desktop-only visibility, independent per-display selection, direct taskbar control, custom hover reveal, and shell-interaction handling is the intended focus of this mod.
 
-The mod distinguishes relevant shell surfaces from ordinary application
-windows. It uses both window classes and the owning process for supported
-Windows shell components, including taskbar popup/overflow surfaces,
-Start/notification/Quick Settings hosts, relevant XAML shell hosts, and known
-Alt+Tab window classes. These surfaces can keep the relevant taskbar visible
-while the user is interacting with the shell.
+## Per-Display Configuration
 
-## Explorer integration and crash recovery
+The mod supports independent configuration for each display.
 
-The main state manager runs in a dedicated `windhawk.exe` process. A small
-Explorer-side hook exists only to prevent the specific secondary-taskbar
-`SW_SHOWNA` transition that caused a visible re-show after the mod had hidden
-the taskbar. It does not alter Explorer's general taskbar behavior.
+Users can configure:
 
-Each taskbar hidden by the mod is marked with the PID of the owning tool
-process. Explorer caches and checks that process's liveness. If a stale marker
-is detected, the marker is removed and the taskbar is restored through the
-original Explorer `ShowWindow` path. Explorer also performs a stale-marker
-sweep when the Explorer-side component initializes, covering both the primary
-and secondary taskbars.
+- Which displays should use desktop-based taskbar hiding
+- Which displays should allow hover reveal
 
-This means a normal unload restores taskbars, while stale state left by an
-unexpected tool-process termination can be cleaned up without requiring an
-Explorer restart. Taskbars that were never hidden by this mod are not restored
-by the cleanup path.
+Display selection can target:
 
-## Multi-monitor behavior
+- All displays
+- Individual displays
 
-Example with two displays:
+Display selections use the mod's display-selection entries and stable monitor/device identity tracking. Windows device names such as `\\.\DISPLAY1` are used internally to identify monitors, but these identifiers may differ from the display numbers shown in Windows Display Settings.
 
-1. Display 1 has an application open.
-2. Display 2 shows only the desktop.
-3. The selected taskbar on display 1 stays visible.
+The mod tracks monitor/device identity so that a selected display can remain associated with the same detected physical monitor when Windows temporarily changes `DISPLAYn` ordering during the current session.
+
+## Hover Reveal
+
+For bottom-docked taskbars, the mod provides a configurable bottom-edge hover area.
+
+When the cursor enters the configured area of a selected display, a taskbar hidden by the mod is revealed.
+
+When the cursor leaves the hover area, the taskbar remains visible for the configured delay before being hidden again.
+
+The hover area is calculated using the taskbar's current height and display DPI together with the configured additional margin.
+
+Hover reveal applies only to bottom-docked taskbars. Taskbars docked to the top or sides are not affected by this feature.
+
+The hover-dismiss delay applies only to hover-based hiding. Other state changes, such as a display becoming desktop-only again, are handled independently.
+
+Cursor tracking uses a dedicated lightweight sampling thread. It uses faster sampling when hover tracking is active and backs off when hover tracking is not needed. The sampler also backs off after repeated cursor-position failures.
+
+## Windows Shell Interactions
+
+The mod accounts for relevant Windows shell surfaces so that the taskbar does not disappear unnecessarily while the user is interacting with Windows.
+
+This includes supported situations involving:
+
+- Start menu
+- Taskbar menus and popups
+- Tray and notification overflow
+- Notification and Quick Settings surfaces
+- Alt+Tab and related task-switching UI
+
+Known shell window classes and the relevant Windows shell processes are considered when identifying these surfaces.
+
+Shell interaction detection is handled separately from the normal application-window check.
+
+## Explorer Integration
+
+The mod includes a small Explorer-side protection for a specific taskbar visibility transition.
+
+When a secondary taskbar has been hidden by the mod, Windows Explorer may independently attempt to show that taskbar using `ShowWindow(..., SW_SHOWNA)`.
+
+The mod blocks that specific transition only while the taskbar is still owned by a running instance of the mod's dedicated tool process.
+
+The protection is intentionally narrow:
+
+- It applies only to the secondary taskbar.
+- It applies only to a taskbar marked as hidden by this mod.
+- It applies only to the `SW_SHOWNA` transition.
+- Other Explorer `ShowWindow` calls are passed through normally.
+
+This prevents a brief secondary-taskbar flash while leaving unrelated Explorer window behavior unchanged.
+
+### Failure Recovery
+
+The taskbar ownership marker contains the process ID and creation time of the dedicated tool process that hid the taskbar.
+
+If that process is no longer running, the Explorer-side check removes the stale marker and restores the taskbar through Explorer's normal `ShowWindow` path.
+
+This prevents an unexpected tool-process termination from leaving a taskbar hidden or permanently blocking Explorer from restoring it.
+
+Stale hidden-taskbar state is also checked during Explorer initialization and by a low-frequency Explorer-side recovery check for both primary and secondary taskbars.
+
+## Multi-Monitor Example
+
+Consider a system with two displays:
+
+1. An application is open on display 1.
+2. Display 2 is showing only the desktop.
+3. The selected taskbar on display 1 remains visible.
 4. The selected taskbar on display 2 hides.
-5. Moving to the configured bottom edge of display 2 reveals its taskbar.
-6. Leaving the hover zone starts the configured dismissal delay.
-7. Opening an application on display 2 keeps its taskbar visible.
+5. Moving the cursor into display 2's configured bottom-edge area reveals its taskbar.
+6. After leaving the hover area, the taskbar hides again after the configured delay.
+7. Opening an application on display 2 causes its taskbar to remain visible.
 
-Applications spanning multiple displays count on every display they intersect.
-Maximized windows use Windows' monitor assignment.
+The same logic is applied independently to each selected display.
 
-## Display and taskbar changes
+Applications that span multiple displays are considered for every display they intersect, while maximized windows use the monitor assignment provided by Windows.
 
-Taskbars are rediscovered during reconciliation, so Explorer taskbar recreation
-does not leave the mod tied to an old window handle. State is refreshed for
-relevant taskbar, display, settings, theme, window, and shell visibility
-changes, with a periodic safety poll for missed transitions.
+## Explorer and Display Changes
 
-A display-topology signature resets transient hover state when monitor geometry
-or the connected display set changes.
+The mod refreshes its taskbar and display state when relevant shell or display configuration changes occur.
+
+This allows taskbar state to be rebuilt when:
+
+- Taskbars are recreated
+- Explorer-related state changes
+- The display topology changes
+- Monitors are added or removed
+- Display configuration changes
+- Settings are changed
+
+Taskbars are rediscovered rather than assuming that their window handles remain unchanged.
+
+Display identity is tracked using monitor/device information rather than relying solely on the current `DISPLAYn` ordering.
+
+## Taskbar Ownership
+
+The mod tracks whether a taskbar was actually hidden by the mod.
+
+This prevents the mod from unnecessarily restoring or changing taskbar visibility that it did not cause itself.
+
+Ownership is also associated with the dedicated tool process so that stale ownership can be detected after an unexpected process termination.
+
+When the owning tool process is no longer running, stale ownership can be cleared and the affected taskbar can recover through Explorer's normal visibility path.
+
+## Performance
+
+The full application and display scan runs in the dedicated tool process rather than inside Explorer.
+
+The mod uses:
+
+- A dedicated worker thread for state management
+- A lightweight cursor-sampling thread for hover detection
+- Event-driven refreshes for relevant window and shell changes
+- A periodic safety poll for missed or unusual transitions
+- A one-shot timer for hover dismissal
+
+The Explorer-side hook performs only the narrow visibility check required for secondary-taskbar flash prevention. A separate low-frequency Explorer recovery thread only checks for stale mod-owned taskbar state and does not participate in normal taskbar visibility decisions.
+
+Cursor sampling backs off when hover tracking is not needed and also backs off after repeated cursor-position failures.
+
+The periodic safety poll provides a recovery path for missed or unusual transitions. The current implementation uses a fixed short polling interval; this may be optimized further in a future revision.
 
 ## Limitations
 
 - Hover reveal is supported only for bottom-docked taskbars.
-- Display selection currently exposes `DISPLAY1` through `DISPLAY16`.
-- `DISPLAYn` identifiers may differ from the numbering shown in Windows Display
-  Settings and can change after display configuration changes.
-- A taskbar docked to the top or side is not hidden by the desktop-only rule.
-- A display selection that no longer matches any connected display remains
-  configured until the user changes the setting.
-- The mod does not modify Windows' native taskbar auto-hide setting.
-
-## Demo
-
-A real recording is recommended here for the repository submission: show a
-selected taskbar hiding when its display becomes desktop-only, revealing when
-the pointer reaches the bottom edge, and hiding again after the dismissal
-delay. Do not use a generated or illustrative image in place of a real
-recording.
+- Windows display device names such as `\\.\DISPLAY1` may differ from the display numbering shown in Windows Display Settings.
+- Display device names can change after display configuration changes.
+- The current display-selection configuration supports up to 16 display entries.
+- The mod intentionally keeps Windows' native taskbar auto-hide setting separate from its own hiding behavior.
+- Windows shell window classes and processes can change between Windows releases, so shell-interaction detection may require updates for future Windows versions.
+- The mod is designed specifically around Windows' Explorer/taskbar behavior and is not intended to be a general-purpose taskbar customization framework.
 
 ## Goal
 
-The goal is a specific visibility rule:
+The goal is not to replace Windows' native taskbar auto-hide or provide a general-purpose taskbar customization framework.
+
+The goal is a specific behavior:
 
 > **Hide the taskbar when its display is showing only the desktop.**
 
-The mod combines that per-display application-state rule with independent
-display selection, shell-interaction handling, taskbar recreation recovery,
-and configurable bottom-edge hover reveal.
+The mod combines independent per-display application-state detection with configurable display selection, stable monitor identity tracking, shell-interaction handling, direct taskbar control, and a configurable bottom-edge hover-reveal area.
 */
 // ==/WindhawkModReadme==
 
@@ -197,31 +235,33 @@ and configurable bottom-edge hover reveal.
   $name: Reveal taskbar on bottom-edge hover
   $description: >-
     Select the displays where bottom-edge hovering should reveal the taskbar.
-    The display options use Windows `\\.\DISPLAYn` device numbers, which may
-    differ from the numbers shown in Windows Display Settings. Select All
-    displays to enable it everywhere, or replace it with individual displays.
+    Select the displays by their current logical number (Display 1, Display 2, and
+    so on). Internal Windows device identifiers can differ and are not used for
+    the selection number. Select All displays to enable it everywhere, or replace
+    it with individual displays.
   $options:
   - all: All displays
-  - monitor1: DISPLAY1
-  - monitor2: DISPLAY2
-  - monitor3: DISPLAY3
-  - monitor4: DISPLAY4
-  - monitor5: DISPLAY5
-  - monitor6: DISPLAY6
-  - monitor7: DISPLAY7
-  - monitor8: DISPLAY8
-  - monitor9: DISPLAY9
-  - monitor10: DISPLAY10
-  - monitor11: DISPLAY11
-  - monitor12: DISPLAY12
-  - monitor13: DISPLAY13
-  - monitor14: DISPLAY14
-  - monitor15: DISPLAY15
-  - monitor16: DISPLAY16
+  - monitor1: Display 1
+  - monitor2: Display 2
+  - monitor3: Display 3
+  - monitor4: Display 4
+  - monitor5: Display 5
+  - monitor6: Display 6
+  - monitor7: Display 7
+  - monitor8: Display 8
+  - monitor9: Display 9
+  - monitor10: Display 10
+  - monitor11: Display 11
+  - monitor12: Display 12
+  - monitor13: Display 13
+  - monitor14: Display 14
+  - monitor15: Display 15
+  - monitor16: Display 16
 - hideOnMonitors: ["all"]
   $name: Taskbars to hide on desktop
   $description: >-
-    Select one or more displays using the Windows `\\.\DISPLAYn` device number.
+    Select one or more displays using their current logical display number. Internal
+    Windows `\\.\DISPLAYn` identifiers are not used for the selection number.
     These numbers may differ from the display numbers shown in Windows Display
     Settings. Choose All displays to hide every connected display. Only
     bottom-docked taskbars participate in desktop-based hiding. Use Add to
@@ -230,22 +270,22 @@ and configurable bottom-edge hover reveal.
     monitor device when possible.
   $options:
   - all: All displays
-  - monitor1: DISPLAY1
-  - monitor2: DISPLAY2
-  - monitor3: DISPLAY3
-  - monitor4: DISPLAY4
-  - monitor5: DISPLAY5
-  - monitor6: DISPLAY6
-  - monitor7: DISPLAY7
-  - monitor8: DISPLAY8
-  - monitor9: DISPLAY9
-  - monitor10: DISPLAY10
-  - monitor11: DISPLAY11
-  - monitor12: DISPLAY12
-  - monitor13: DISPLAY13
-  - monitor14: DISPLAY14
-  - monitor15: DISPLAY15
-  - monitor16: DISPLAY16
+  - monitor1: Display 1
+  - monitor2: Display 2
+  - monitor3: Display 3
+  - monitor4: Display 4
+  - monitor5: Display 5
+  - monitor6: Display 6
+  - monitor7: Display 7
+  - monitor8: Display 8
+  - monitor9: Display 9
+  - monitor10: Display 10
+  - monitor11: Display 11
+  - monitor12: Display 12
+  - monitor13: Display 13
+  - monitor14: Display 14
+  - monitor15: Display 15
+  - monitor16: Display 16
 */
 // ==/WindhawkModSettings==
 
@@ -301,7 +341,6 @@ struct MonitorSelectionBinding {
 
 struct WindowScanResult {
     bool applicationOnMonitor[kMaxMonitorNumbers];
-    bool shellSurfaceOnMonitor[kMaxMonitorNumbers];
 };
 
 HWINEVENTHOOK g_foregroundHook = nullptr;
@@ -329,6 +368,10 @@ SRWLOCK g_cursorHoverSnapshotLock = SRWLOCK_INIT;
 
 constexpr wchar_t kHiddenByModProperty[] =
     L"Windhawk.HideTaskbarOnlyOnDesktop.HiddenByMod";
+constexpr wchar_t kHiddenByModCreationTimeLowProperty[] =
+    L"Windhawk.HideTaskbarOnlyOnDesktop.HiddenByMod.CreationTimeLow";
+constexpr wchar_t kHiddenByModCreationTimeHighProperty[] =
+    L"Windhawk.HideTaskbarOnlyOnDesktop.HiddenByMod.CreationTimeHigh";
 
 // Explorer-side protection for the secondary-taskbar shell transition.
 // The dedicated tool process remains authoritative for taskbar state. Explorer
@@ -340,7 +383,36 @@ bool g_isExplorerProcess = false;
 
 DWORD g_hiddenTaskbarOwnerPid = 0;
 HANDLE g_hiddenTaskbarOwnerProcess = nullptr;
+FILETIME g_hiddenTaskbarOwnerCreationTime = {};
+HANDLE g_explorerRecoveryThread = nullptr;
+HANDLE g_explorerRecoveryStopEvent = nullptr;
 SRWLOCK g_hiddenTaskbarOwnerCacheLock = SRWLOCK_INIT;
+
+bool GetProcessCreationTime(
+    HANDLE process,
+    FILETIME* creationTime
+) {
+    if (!process || !creationTime) {
+        return false;
+    }
+
+    FILETIME exitTime = {};
+    FILETIME kernelTime = {};
+    FILETIME userTime = {};
+
+    return GetProcessTimes(
+        process,
+        creationTime,
+        &exitTime,
+        &kernelTime,
+        &userTime
+    ) != FALSE;
+}
+
+void RecoverStaleHiddenTaskbars();
+bool SetHiddenTaskbarOwnershipMarker(HWND hwnd);
+void RemoveHiddenTaskbarOwnershipMarker(HWND hwnd);
+void RestoreHiddenTaskbarOwnershipMarker(HWND hwnd);
 
 void ResetHiddenTaskbarOwnerCache() {
     AcquireSRWLockExclusive(
@@ -355,6 +427,7 @@ void ResetHiddenTaskbarOwnerCache() {
     }
 
     g_hiddenTaskbarOwnerPid = 0;
+    g_hiddenTaskbarOwnerCreationTime = {};
 
     ReleaseSRWLockExclusive(
         &g_hiddenTaskbarOwnerCacheLock
@@ -396,17 +469,33 @@ bool IsHiddenTaskbarOwnerAlive(HWND hwnd) {
     }
 
     HANDLE marker = GetPropW(hwnd, kHiddenByModProperty);
-
     if (!marker) {
         return false;
     }
 
     DWORD ownerPid = static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(marker));
 
+    const bool hasCreationTime =
+        GetPropW(hwnd, kHiddenByModCreationTimeLowProperty) != nullptr &&
+        GetPropW(hwnd, kHiddenByModCreationTimeHighProperty) != nullptr;
+
+    FILETIME markerCreationTime = {};
+    markerCreationTime.dwLowDateTime =
+        static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(
+            GetPropW(hwnd, kHiddenByModCreationTimeLowProperty)));
+    markerCreationTime.dwHighDateTime =
+        static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(
+            GetPropW(hwnd, kHiddenByModCreationTimeHighProperty)));
+
+
     if (!ownerPid) {
         RemovePropW(hwnd, kHiddenByModProperty);
+        RemovePropW(hwnd, kHiddenByModCreationTimeLowProperty);
+        RemovePropW(hwnd, kHiddenByModCreationTimeHighProperty);
         return false;
     }
+
+    bool ownerAlive = false;
 
     AcquireSRWLockExclusive(&g_hiddenTaskbarOwnerCacheLock);
 
@@ -417,16 +506,47 @@ bool IsHiddenTaskbarOwnerAlive(HWND hwnd) {
         }
 
         g_hiddenTaskbarOwnerPid = ownerPid;
+        g_hiddenTaskbarOwnerCreationTime = {};
         g_hiddenTaskbarOwnerProcess =
-            OpenProcess(SYNCHRONIZE, FALSE, ownerPid);
+            OpenProcess(
+                SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                FALSE,
+                ownerPid
+            );
+
+        if (g_hiddenTaskbarOwnerProcess) {
+            GetProcessCreationTime(
+                g_hiddenTaskbarOwnerProcess,
+                &g_hiddenTaskbarOwnerCreationTime
+            );
+        }
     }
 
-    bool ownerAlive =
+    ownerAlive =
         g_hiddenTaskbarOwnerProcess &&
         WaitForSingleObject(g_hiddenTaskbarOwnerProcess, 0) == WAIT_TIMEOUT;
 
+    if (ownerAlive && !hasCreationTime) {
+        // Markers created by older versions contained only a PID. Treat them
+        // as stale once this version is running so a reused PID cannot inherit
+        // hidden-taskbar ownership accidentally. The tool process will rebuild
+        // the marker if the taskbar still needs to remain hidden.
+        ownerAlive = false;
+    } else if (
+        ownerAlive &&
+        CompareFileTime(
+            &markerCreationTime,
+            &g_hiddenTaskbarOwnerCreationTime
+        ) != 0
+    ) {
+        ownerAlive = false;
+    }
+
+
     if (!ownerAlive) {
         RemovePropW(hwnd, kHiddenByModProperty);
+        RemovePropW(hwnd, kHiddenByModCreationTimeLowProperty);
+        RemovePropW(hwnd, kHiddenByModCreationTimeHighProperty);
 
         if (g_hiddenTaskbarOwnerProcess) {
             CloseHandle(g_hiddenTaskbarOwnerProcess);
@@ -434,6 +554,7 @@ bool IsHiddenTaskbarOwnerAlive(HWND hwnd) {
         }
 
         g_hiddenTaskbarOwnerPid = 0;
+        g_hiddenTaskbarOwnerCreationTime = {};
     }
 
     ReleaseSRWLockExclusive(&g_hiddenTaskbarOwnerCacheLock);
@@ -441,18 +562,22 @@ bool IsHiddenTaskbarOwnerAlive(HWND hwnd) {
     return ownerAlive;
 }
 
+
 void RecoverStaleHiddenTaskbar(HWND hwnd) {
     if (!IsExplorerTaskbar(hwnd) ||
         !GetPropW(hwnd, kHiddenByModProperty)) {
         return;
     }
 
+
     if (IsHiddenTaskbarOwnerAlive(hwnd)) {
         return;
     }
 
+
     if (g_explorerShowWindowOriginal) {
-        g_explorerShowWindowOriginal(hwnd, SW_SHOW);
+        RemoveHiddenTaskbarOwnershipMarker(hwnd);
+        g_explorerShowWindowOriginal(hwnd, SW_SHOWNA);
     }
 }
 
@@ -470,6 +595,72 @@ void RecoverStaleHiddenTaskbars() {
     }
 }
 
+DWORD WINAPI ExplorerRecoveryThread(LPVOID) {
+    constexpr DWORD kRecoveryCheckIntervalMs = 1000;
+
+    for (;;) {
+        DWORD result = WaitForSingleObject(
+            g_explorerRecoveryStopEvent,
+            kRecoveryCheckIntervalMs
+        );
+
+        if (result != WAIT_TIMEOUT) {
+            break;
+        }
+
+        RecoverStaleHiddenTaskbars();
+    }
+
+    return 0;
+}
+
+bool StartExplorerRecoveryThread() {
+    g_explorerRecoveryStopEvent =
+        CreateEventW(nullptr, TRUE, FALSE, nullptr);
+
+    if (!g_explorerRecoveryStopEvent) {
+        Wh_Log(L"CreateEventW(explorer recovery) failed: %lu", GetLastError());
+        return false;
+    }
+
+    g_explorerRecoveryThread = CreateThread(
+        nullptr,
+        0,
+        ExplorerRecoveryThread,
+        nullptr,
+        0,
+        nullptr
+    );
+
+    if (!g_explorerRecoveryThread) {
+        Wh_Log(L"CreateThread(explorer recovery) failed: %lu", GetLastError());
+        CloseHandle(g_explorerRecoveryStopEvent);
+        g_explorerRecoveryStopEvent = nullptr;
+        return false;
+    }
+
+    return true;
+}
+
+void StopExplorerRecoveryThread() {
+    if (g_explorerRecoveryStopEvent) {
+        SetEvent(g_explorerRecoveryStopEvent);
+    }
+
+    if (g_explorerRecoveryThread) {
+        // The thread is executing code from the injected module, so it must be
+        // fully stopped before Explorer unloads the mod.
+        WaitForSingleObject(g_explorerRecoveryThread, INFINITE);
+        CloseHandle(g_explorerRecoveryThread);
+        g_explorerRecoveryThread = nullptr;
+    }
+
+    if (g_explorerRecoveryStopEvent) {
+        CloseHandle(g_explorerRecoveryStopEvent);
+        g_explorerRecoveryStopEvent = nullptr;
+    }
+}
+
 BOOL WINAPI ExplorerShowWindowHook(HWND hwnd, int nCmdShow) {
     if (nCmdShow == SW_SHOWNA && IsExplorerTaskbar(hwnd)) {
         const bool marked =
@@ -479,7 +670,8 @@ BOOL WINAPI ExplorerShowWindowHook(HWND hwnd, int nCmdShow) {
             const bool ownerAlive = IsHiddenTaskbarOwnerAlive(hwnd);
 
             if (!ownerAlive && g_explorerShowWindowOriginal) {
-                return g_explorerShowWindowOriginal(hwnd, SW_SHOW);
+                RemoveHiddenTaskbarOwnershipMarker(hwnd);
+                return g_explorerShowWindowOriginal(hwnd, SW_SHOWNA);
             }
 
             if (ownerAlive && IsExplorerSecondaryTaskbar(hwnd)) {
@@ -492,6 +684,7 @@ BOOL WINAPI ExplorerShowWindowHook(HWND hwnd, int nCmdShow) {
 }
 
 bool InstallExplorerVisibilityHook() {
+
     if (
         !WindhawkUtils::SetFunctionHook(
             ShowWindow,
@@ -725,56 +918,6 @@ bool GetStableMonitorDeviceId(
     return output[0] != L'\0';
 }
 
-int GetDisplayDeviceNumber(
-    const wchar_t* deviceName
-) {
-    if (!deviceName) {
-        return 0;
-    }
-
-    constexpr wchar_t kPrefix[] = L"\\\\.\\DISPLAY";
-    constexpr size_t kPrefixLength =
-        ARRAYSIZE(kPrefix) - 1;
-
-    if (
-        wcsncmp(
-            deviceName,
-            kPrefix,
-            kPrefixLength
-        ) != 0
-    ) {
-        return 0;
-    }
-
-    wchar_t* endNumber = nullptr;
-
-    long number =
-        wcstol(
-            deviceName + kPrefixLength,
-            &endNumber,
-            10
-        );
-
-    if (
-        endNumber == deviceName + kPrefixLength ||
-        *endNumber != L'\0' ||
-        number < 1 ||
-        number > static_cast<long>(
-            kMaxMonitorNumbers
-        )
-    ) {
-        Wh_Log(
-            L"Unsupported display device number for %s: %ld (supported range: 1-%d)",
-            deviceName,
-            number,
-            static_cast<int>(kMaxMonitorNumbers)
-        );
-        return 0;
-    }
-
-    return static_cast<int>(number);
-}
-
 void ResetMonitorSelectionBindings() {
     for (
         size_t i = 0;
@@ -804,11 +947,11 @@ void BindSelectionIdentity(
     }
 
     for (size_t i = 0; i < monitors.count; ++i) {
-        if (
-            GetDisplayDeviceNumber(
-                monitors.entries[i].deviceName
-            ) == configuredNumber
-        ) {
+        // Settings use the logical order of the currently connected
+        // monitors rather than the Windows DISPLAYn device identifier.
+        // This keeps "Display 2" usable even when Windows happens to name
+        // that monitor DISPLAY25, DISPLAY9, or another non-sequential value.
+        if (static_cast<int>(i + 1) == configuredNumber) {
             if (monitors.entries[i].stableDeviceId[0] != L'\0') {
                 bindings[configuredNumber].configured = true;
                 wcsncpy_s(
@@ -901,6 +1044,49 @@ MonitorList GetCurrentMonitors() {
         reinterpret_cast<LPARAM>(&list)
     );
 
+    // Give the settings UI a deterministic, user-friendly numbering: the
+    // primary display is Display 1, followed by the remaining active displays
+    // ordered by their Windows device name. The actual device number is only
+    // an internal identifier and is never used as the selection index.
+    for (size_t i = 1; i < list.count; ++i) {
+        MonitorEntry key = list.entries[i];
+        MONITORINFO miKey = {};
+        miKey.cbSize = sizeof(miKey);
+        const bool keyPrimary =
+            key.monitor &&
+            GetMonitorInfoW(key.monitor, &miKey) &&
+            (miKey.dwFlags & MONITORINFOF_PRIMARY) != 0;
+
+        size_t j = i;
+        while (j > 0) {
+            MONITORINFO miPrev = {};
+            miPrev.cbSize = sizeof(miPrev);
+            const bool prevPrimary =
+                list.entries[j - 1].monitor &&
+                GetMonitorInfoW(list.entries[j - 1].monitor, &miPrev) &&
+                (miPrev.dwFlags & MONITORINFOF_PRIMARY) != 0;
+
+            bool shouldMoveBefore = false;
+            if (keyPrimary != prevPrimary) {
+                shouldMoveBefore = keyPrimary;
+            } else {
+                shouldMoveBefore =
+                    wcscmp(
+                        key.deviceName,
+                        list.entries[j - 1].deviceName
+                    ) < 0;
+            }
+
+            if (!shouldMoveBefore) {
+                break;
+            }
+
+            list.entries[j] = list.entries[j - 1];
+            --j;
+        }
+        list.entries[j] = key;
+    }
+
     return list;
 }
 
@@ -951,9 +1137,9 @@ int GetMonitorNumber(
 ) {
     for (size_t i = 0; i < list.count; ++i) {
         if (list.entries[i].monitor == monitor) {
-            return GetDisplayDeviceNumber(
-                list.entries[i].deviceName
-            );
+            // The settings UI is intentionally based on the logical monitor
+            // order, not the internal Windows DISPLAYn device identifier.
+            return static_cast<int>(i + 1);
         }
     }
 
@@ -1261,16 +1447,6 @@ bool IsShellSurfaceWindow(
     return false;
 }
 
-bool IsTransientShellWindow(
-    HWND hwnd,
-    const WCHAR* className
-) {
-    return IsShellSurfaceWindow(
-        hwnd,
-        className
-    );
-}
-
 bool IsApplicationWindowCandidate(
     HWND hwnd,
     const WCHAR* className
@@ -1300,7 +1476,7 @@ bool IsApplicationWindowCandidate(
         return false;
     }
 
-    if (IsTransientShellWindow(
+    if (IsShellSurfaceWindow(
             hwnd,
             className
         )) {
@@ -1374,34 +1550,6 @@ BOOL CALLBACK ScanWindowsWithMonitorsProc(
         ) == 0
     ) {
         return TRUE;
-    }
-
-    if (IsShellSurfaceWindow(
-            hwnd,
-            className
-        )) {
-        RECT popupRect = {};
-
-        if (GetWindowRect(hwnd, &popupRect)) {
-            // Mark every display intersected by the popup rather than using
-            // its center point. This handles shell surfaces that straddle
-            // monitor boundaries and avoids arbitrarily selecting one display.
-            for (
-                size_t i = 0;
-                i < context->monitors->count;
-                ++i
-            ) {
-                RECT intersection = {};
-
-                if (IntersectRect(
-                        &intersection,
-                        &popupRect,
-                        &context->monitors->entries[i].rect
-                    )) {
-                    context->result->shellSurfaceOnMonitor[i] = true;
-                }
-            }
-        }
     }
 
     if (!IsApplicationWindowCandidate(
@@ -1681,6 +1829,78 @@ bool ShouldHideTaskbar(
 }
 
 
+bool SetHiddenTaskbarOwnershipMarker(HWND hwnd) {
+    if (!hwnd) {
+        return false;
+    }
+
+    FILETIME creationTime = {};
+    if (!GetProcessCreationTime(
+            GetCurrentProcess(),
+            &creationTime
+        )) {
+        Wh_Log(L"GetProcessTimes(current process) failed: %lu", GetLastError());
+        return SetPropW(
+            hwnd,
+            kHiddenByModProperty,
+            reinterpret_cast<HANDLE>(
+                static_cast<ULONG_PTR>(GetCurrentProcessId())
+            )
+        ) != FALSE;
+    }
+
+    const bool pidSet = SetPropW(
+        hwnd,
+        kHiddenByModProperty,
+        reinterpret_cast<HANDLE>(
+            static_cast<ULONG_PTR>(GetCurrentProcessId())
+        )
+    ) != FALSE;
+
+    const bool lowSet = SetPropW(
+        hwnd,
+        kHiddenByModCreationTimeLowProperty,
+        reinterpret_cast<HANDLE>(
+            static_cast<ULONG_PTR>(creationTime.dwLowDateTime)
+        )
+    ) != FALSE;
+
+    const bool highSet = SetPropW(
+        hwnd,
+        kHiddenByModCreationTimeHighProperty,
+        reinterpret_cast<HANDLE>(
+            static_cast<ULONG_PTR>(creationTime.dwHighDateTime)
+        )
+    ) != FALSE;
+
+    if (!pidSet || !lowSet || !highSet) {
+        Wh_Log(L"Set hidden taskbar ownership metadata failed for 0x%p: %lu",
+               hwnd, GetLastError());
+        RemovePropW(hwnd, kHiddenByModCreationTimeLowProperty);
+        RemovePropW(hwnd, kHiddenByModCreationTimeHighProperty);
+    }
+
+    return pidSet;
+}
+
+void RemoveHiddenTaskbarOwnershipMarker(HWND hwnd) {
+    if (!hwnd) {
+        return;
+    }
+
+    RemovePropW(hwnd, kHiddenByModProperty);
+    RemovePropW(hwnd, kHiddenByModCreationTimeLowProperty);
+    RemovePropW(hwnd, kHiddenByModCreationTimeHighProperty);
+}
+
+void RestoreHiddenTaskbarOwnershipMarker(HWND hwnd) {
+    if (!hwnd) {
+        return;
+    }
+
+    SetHiddenTaskbarOwnershipMarker(hwnd);
+}
+
 void SetTaskbarState(
     TaskbarMonitorState& state,
     bool show
@@ -1697,21 +1917,25 @@ void SetTaskbarState(
             return;
         }
 
-        // Keep normal state transitions synchronous. Explorer can immediately
-        // re-show a taskbar while processing shell/minimize transitions; using
-        // ShowWindowAsync here can leave several SHOW/HIDE requests queued and
-        // cause a visible flicker loop.
+        // Clear our ownership marker before showing so Explorer is never left
+        // with a hidden taskbar that still looks owned by this mod. Keep the
+        // normal transition synchronous so Explorer cannot queue a stale SHOW
+        // behind our state reconciliation.
+        RemoveHiddenTaskbarOwnershipMarker(state.hwnd);
+
         ShowWindow(
             state.hwnd,
-            SW_SHOW
+            SW_SHOWNA
         );
 
         if (IsWindowVisible(state.hwnd)) {
-            RemovePropW(
-                state.hwnd,
-                kHiddenByModProperty
-            );
             state.hiddenByMod = false;
+        } else {
+            // Restore the marker if the show operation did not make the taskbar
+            // visible. This keeps ownership explicit rather than leaving a
+            // silently hidden, unowned taskbar behind.
+            RestoreHiddenTaskbarOwnershipMarker(state.hwnd);
+            state.hiddenByMod = true;
         }
 
         return;
@@ -1727,17 +1951,9 @@ void SetTaskbarState(
         return;
     }
 
-    if (!SetPropW(
-            state.hwnd,
-            kHiddenByModProperty,
-            reinterpret_cast<HANDLE>(
-                static_cast<ULONG_PTR>(
-                    GetCurrentProcessId()
-                )
-            )
-        )) {
+    if (!SetHiddenTaskbarOwnershipMarker(state.hwnd)) {
         Wh_Log(
-            L"SetPropW failed for taskbar 0x%p: %lu",
+            L"Set hidden taskbar ownership marker failed for 0x%p: %lu",
             state.hwnd,
             GetLastError()
         );
@@ -1751,12 +1967,73 @@ void SetTaskbarState(
     if (!IsWindowVisible(state.hwnd)) {
         state.hiddenByMod = true;
     } else {
-        RemovePropW(
-            state.hwnd,
-            kHiddenByModProperty
-        );
+        RemoveHiddenTaskbarOwnershipMarker(state.hwnd);
         state.hiddenByMod = false;
     }
+}
+
+struct VisibleShellPopupContext {
+    HMONITOR monitor;
+    bool found;
+};
+
+BOOL CALLBACK FindVisibleShellPopupOnMonitorProc(
+    HWND hwnd,
+    LPARAM lParam
+) {
+    auto* context =
+        reinterpret_cast<VisibleShellPopupContext*>(lParam);
+
+    if (!context || context->found || !IsWindowVisible(hwnd)) {
+        return context && context->found ? FALSE : TRUE;
+    }
+
+    WCHAR className[256] = {};
+    if (GetClassNameW(hwnd, className, ARRAYSIZE(className)) == 0) {
+        return TRUE;
+    }
+
+    if (!IsTaskbarPopupClass(className) ||
+        IsShellChromeClass(className) ||
+        IsDesktopInfrastructureWindow(hwnd, className)) {
+        return TRUE;
+    }
+
+    RECT rect = {};
+    if (!GetWindowRect(hwnd, &rect)) {
+        return TRUE;
+    }
+
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(mi);
+    if (!context->monitor ||
+        !GetMonitorInfoW(context->monitor, &mi)) {
+        return TRUE;
+    }
+
+    RECT intersection = {};
+    if (IntersectRect(&intersection, &rect, &mi.rcMonitor)) {
+        context->found = true;
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+bool IsVisibleShellPopupOnMonitor(HMONITOR monitor) {
+    if (!monitor) {
+        return false;
+    }
+
+    VisibleShellPopupContext context = {};
+    context.monitor = monitor;
+
+    EnumWindows(
+        FindVisibleShellPopupOnMonitorProc,
+        reinterpret_cast<LPARAM>(&context)
+    );
+
+    return context.found;
 }
 
 void ApplyBaseTaskbarState() {
@@ -1945,7 +2222,8 @@ void UpdateCursorHoverSnapshot() {
 
         const TaskbarMonitorState& state = g_taskbarStates[i];
 
-        if (!ShouldRevealOnHover(state) ||
+        if (!state.hiddenByMod ||
+            !ShouldRevealOnHover(state) ||
             !IsBottomDockedTaskbar(state.hwnd, state.monitor)) {
             continue;
         }
@@ -2033,6 +2311,7 @@ bool IsCursorInConfiguredHoverZoneAtSnapshot(
 }
 
 void UpdateTaskbarState() {
+
     MonitorList monitors =
         GetCurrentMonitors();
 
@@ -2061,6 +2340,9 @@ void UpdateTaskbarState() {
 
     g_displayTopologySignature = topologySignature;
 
+    for (size_t i = 0; i < monitors.count; ++i) {
+    }
+
     BindConfiguredMonitorSelections(
         monitors
     );
@@ -2068,8 +2350,6 @@ void UpdateTaskbarState() {
     RefreshTaskbarMonitorStates(
         monitors
     );
-
-    UpdateCursorHoverSnapshot();
 
     // ABM_GETSTATE reports the native auto-hide setting globally. Sample it
     // once per reconciliation and reuse the result for every taskbar.
@@ -2105,6 +2385,7 @@ void UpdateTaskbarState() {
                 break;
             }
         }
+
     }
 
     POINT cursorPoint = {};
@@ -2151,25 +2432,6 @@ void UpdateTaskbarState() {
     const bool hovering =
         cursorInHoverZone;
 
-    auto shellSurfaceOnMonitor =
-        [&](HMONITOR monitor) {
-            for (
-                size_t monitorIndex = 0;
-                monitorIndex < monitors.count;
-                ++monitorIndex
-            ) {
-                if (
-                    monitors.entries[monitorIndex].monitor ==
-                    monitor
-                ) {
-                    return scan.shellSurfaceOnMonitor[
-                        monitorIndex
-                    ];
-                }
-            }
-
-            return false;
-        };
 
     if (hovering) {
         g_hoverActive = true;
@@ -2184,12 +2446,14 @@ void UpdateTaskbarState() {
             SetTaskbarState(
                 state,
                 state.monitor == g_hoverMonitor ||
-                shellSurfaceOnMonitor(state.monitor) ||
                 !state.desktopOnly ||
                 !ShouldHideTaskbar(state)
             );
         }
 
+        // Snapshot the state after visibility reconciliation. The cursor sampler
+        // must see the taskbars that are actually hidden by the mod.
+        UpdateCursorHoverSnapshot();
         return;
     }
 
@@ -2213,12 +2477,43 @@ void UpdateTaskbarState() {
                 SetTaskbarState(
                     state,
                     state.monitor == g_hoverMonitor ||
-                    shellSurfaceOnMonitor(state.monitor) ||
                     !state.desktopOnly ||
                     !ShouldHideTaskbar(state)
                 );
             }
 
+            UpdateCursorHoverSnapshot();
+            return;
+        }
+
+        bool shellPopupPresent = false;
+        for (size_t i = 0; i < g_taskbarStateCount; ++i) {
+            TaskbarMonitorState& state = g_taskbarStates[i];
+            if (IsVisibleShellPopupOnMonitor(state.monitor)) {
+                shellPopupPresent = true;
+                break;
+            }
+        }
+
+        if (shellPopupPresent) {
+            // Keep the revealed taskbar visible while a shell popup/context
+            // menu is still open, even when the cursor has moved outside the
+            // popup. The popup itself is what keeps the interaction alive.
+            for (size_t i = 0; i < g_taskbarStateCount; ++i) {
+                TaskbarMonitorState& state =
+                    g_taskbarStates[i];
+
+                SetTaskbarState(
+                    state,
+                    !state.desktopOnly ||
+                    !ShouldHideTaskbar(state) ||
+                    IsVisibleShellPopupOnMonitor(state.monitor)
+                );
+            }
+
+            g_hoverDeadline = now + 100;
+            ArmHoverExpireTimer();
+            UpdateCursorHoverSnapshot();
             return;
         }
 
@@ -2229,6 +2524,7 @@ void UpdateTaskbarState() {
         CancelHoverExpireTimer();
 
         ApplyBaseTaskbarState();
+        UpdateCursorHoverSnapshot();
         return;
     }
 
@@ -2238,11 +2534,12 @@ void UpdateTaskbarState() {
 
         SetTaskbarState(
             state,
-            shellSurfaceOnMonitor(state.monitor) ||
             !state.desktopOnly ||
             !ShouldHideTaskbar(state)
         );
     }
+
+    UpdateCursorHoverSnapshot();
 }
 
 void ArmHoverExpireTimer() {
@@ -2409,6 +2706,10 @@ bool HasEnabledHoverSnapshot() {
 }
 
 DWORD WINAPI CursorSamplingThread(LPVOID) {
+    SetThreadDpiAwarenessContext(
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+    );
+
     bool lastHoverZone = false;
     HMONITOR lastMonitor = nullptr;
     int cursorPositionFailures = 0;
@@ -2511,6 +2812,11 @@ void CALLBACK WinEventProc(
         return;
     }
 
+    if (event == EVENT_SYSTEM_FOREGROUND) {
+        PostRefresh();
+        return;
+    }
+
     if (
         event != EVENT_SYSTEM_MINIMIZESTART &&
         event != EVENT_SYSTEM_MINIMIZEEND &&
@@ -2542,6 +2848,7 @@ void EnsureTaskbarShowHook() {
         return;
     }
 
+
     SafeUnhookWinEvent(g_taskbarShowHook);
     g_taskbarShowHookProcessId = 0;
 
@@ -2558,10 +2865,10 @@ void EnsureTaskbarShowHook() {
 
         if (g_taskbarShowHook) {
             g_taskbarShowHookProcessId = explorerPid;
+        } else {
         }
     }
 }
-
 
 
 LRESULT CALLBACK WorkerMessageWindowProc(
@@ -2681,24 +2988,13 @@ void DestroyWorkerMessageWindow() {
     g_taskbarCreatedMessage = 0;
 }
 
-void UpdateSafetyTimer(UINT_PTR timerId) {
-    if (!timerId) {
-        return;
-    }
-
-    constexpr UINT kSafetyPollIntervalMs = 1000;
-
-    SetTimer(
-        nullptr,
-        timerId,
-        kSafetyPollIntervalMs,
-        nullptr
-    );
-}
-
 DWORD WINAPI WorkerThread(
     LPVOID
 ) {
+    SetThreadDpiAwarenessContext(
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+    );
+
     MSG msg = {};
 
     PeekMessageW(
@@ -2743,6 +3039,7 @@ DWORD WINAPI WorkerThread(
             WINEVENT_OUTOFCONTEXT
         );
 
+
     g_moveHook =
         SetWinEventHook(
             EVENT_SYSTEM_MOVESIZEEND,
@@ -2757,13 +3054,18 @@ DWORD WINAPI WorkerThread(
     EnsureTaskbarShowHook();
     UpdateTaskbarState();
 
+    // Keep a true periodic safety poll. It is only a fallback for shell/window
+    // transitions that do not produce a usable accessibility event. Refresh
+    // events never re-arm this timer, so frequent events cannot postpone it.
+    constexpr UINT kSafetyPollIntervalMs = 250;
     UINT_PTR timerId =
         SetTimer(
             nullptr,
             kSafetyTimerId,
-            1000,
+            kSafetyPollIntervalMs,
             nullptr
         );
+
 
     for (;;) {
         BOOL result =
@@ -2786,12 +3088,14 @@ DWORD WINAPI WorkerThread(
 
             EnsureTaskbarShowHook();
             UpdateTaskbarState();
-            UpdateSafetyTimer(timerId);
 
             continue;
         }
 
         if (msg.message == WM_APP_REFRESH) {
+            // Clear before processing. A new event that arrives during the
+            // reconciliation can then set the flag again instead of being
+            // silently coalesced into the refresh already in progress.
             InterlockedExchange(
                 &g_refreshPosted,
                 0
@@ -2800,7 +3104,13 @@ DWORD WINAPI WorkerThread(
             EnsureTaskbarShowHook();
             UpdateTaskbarState();
 
-            UpdateSafetyTimer(timerId);
+            // Do not lose a refresh posted while UpdateTaskbarState() ran.
+            if (InterlockedExchange(
+                    &g_refreshPosted,
+                    0
+                ) != 0) {
+                PostRefresh();
+            }
 
             continue;
         }
@@ -2810,7 +3120,6 @@ DWORD WINAPI WorkerThread(
             EnsureTaskbarShowHook();
             UpdateTaskbarState();
 
-            UpdateSafetyTimer(timerId);
 
             continue;
         }
@@ -2818,7 +3127,6 @@ DWORD WINAPI WorkerThread(
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
 
-        UpdateSafetyTimer(timerId);
     }
 
     if (timerId) {
@@ -3113,20 +3421,19 @@ void RestoreAllTaskbars() {
             return;
         }
 
-        /*
-         * Teardown/recovery is intentionally asynchronous. This path can run
-         * during tool shutdown, where blocking on Explorer's UI thread
-         * could otherwise hang Windhawk itself.
-         */
-        ShowWindowAsync(
-            hwnd,
-            SW_SHOW
-        );
+        // Remove ownership before the restore request so Explorer cannot treat
+        // its own SHOW path as an attempt to violate the mod's hidden state.
+        RemoveHiddenTaskbarOwnershipMarker(hwnd);
 
-        RemovePropW(
-            hwnd,
-            kHiddenByModProperty
-        );
+        // Teardown must not wait on Explorer's UI thread.
+        if (!ShowWindowAsync(
+                hwnd,
+                SW_SHOWNA
+            )) {
+            // Keep explicit ownership if the asynchronous restore request could
+            // not be queued.
+            SetHiddenTaskbarOwnershipMarker(hwnd);
+        }
     };
 
     restoreTaskbarIfMarked(
@@ -3355,6 +3662,7 @@ BOOL Wh_ModInit() {
         return FALSE;
     }
 
+
     if (isCurrentToolModProcess) {
         g_toolModProcessMutex =
             CreateMutex(nullptr, TRUE, L"windhawk-tool-mod_" WH_MOD_ID);
@@ -3412,6 +3720,7 @@ void Wh_ModAfterInit() {
     swprintf_s(commandLine, L"\"%s\" -tool-mod \"%s\"", currentProcessPath,
                WH_MOD_ID);
 
+
     HMODULE kernelModule = GetModuleHandle(L"kernelbase.dll");
     if (!kernelModule) {
         kernelModule = GetModuleHandle(L"kernel32.dll");
@@ -3449,6 +3758,7 @@ void Wh_ModAfterInit() {
         return;
     }
 
+
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 }
@@ -3482,7 +3792,18 @@ BOOL Wh_ModInit() {
             return FALSE;
         }
 
+        Wh_Log(
+    L"Explorer init: original=%p",
+    g_explorerShowWindowOriginal
+);
+
         RecoverStaleHiddenTaskbars();
+        StartExplorerRecoveryThread();
+
+        Wh_Log(
+    L"Explorer init: original=%p",
+    g_explorerShowWindowOriginal
+);
         return TRUE;
     }
 
@@ -3507,6 +3828,7 @@ void Wh_ModSettingsChanged() {
 
 void Wh_ModUninit() {
     if (g_isExplorerProcess) {
+        StopExplorerRecoveryThread();
         ResetHiddenTaskbarOwnerCache();
         return;
     }
