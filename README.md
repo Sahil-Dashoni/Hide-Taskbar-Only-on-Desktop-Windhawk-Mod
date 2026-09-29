@@ -4,6 +4,8 @@ A lightweight [Windhawk](https://windhawk.net/) mod that hides selected bottom-d
 
 Each display is evaluated independently. An application on one display does not prevent a selected taskbar on another display from hiding when that display is in the desktop-only or detected fullscreen state.
 
+Mod link to install it from Windhawk:  https://windhawk.net/mods/hide-taskbar-only-on-desktop
+
 ## Demo
 
 ### Multiple Displays
