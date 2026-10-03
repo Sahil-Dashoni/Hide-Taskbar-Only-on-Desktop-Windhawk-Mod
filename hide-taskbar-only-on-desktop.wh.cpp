@@ -2,7 +2,7 @@
 // @id              hide-taskbar-only-on-desktop
 // @name            Hide Taskbar Only on Desktop
 // @description     Hides selected taskbars when their displays are desktop-only or in detected fullscreen
-// @version         8.1.0
+// @version         8.2.0
 // @author          Sahil Dashoni
 // @github          https://github.com/Sahil-Dashoni
 // @include         windhawk.exe
@@ -871,7 +871,7 @@ bool GetWindowProcessImageName(DWORD pid, wchar_t* output, size_t outputCount) {
     return result && output[0] != L'\0';
 }
 enum class ShellProcessKind {
-    None, Explorer, KnownShell, };
+    None, Explorer, KnownShell, StartMenu, };
 
 ShellProcessKind GetShellProcessKind(DWORD pid) {
     wchar_t imagePath[MAX_PATH] = {};
@@ -879,8 +879,10 @@ ShellProcessKind GetShellProcessKind(DWORD pid) {
     const wchar_t* baseName = wcsrchr(imagePath, L'\\');
     baseName = baseName ? baseName + 1 : imagePath;
     if (_wcsicmp(baseName, L"explorer.exe") == 0) return ShellProcessKind::Explorer;
+    if (_wcsicmp(baseName, L"StartMenuExperienceHost.exe") == 0) {
+        return ShellProcessKind::StartMenu;
+    }
     static const wchar_t* kKnownShellProcesses[] = {
-        L"StartMenuExperienceHost.exe",
         L"ShellExperienceHost.exe",
         L"ShellHost.exe",
         L"SearchHost.exe",
@@ -945,26 +947,15 @@ bool IsAltTabClass(const WCHAR* className) {
 }
 bool IsTaskbarWindow(HWND hwnd);
 bool IsPopupOwnedByTaskbar(HWND hwnd);
+bool IsShellSurfaceCandidateClass(const WCHAR* className);
 bool IsShellSurfaceEventWindow(HWND hwnd, const WCHAR* className,
                                ShellProcessKind processKind);
 
-bool IsStartMenuExperienceHostProcess(DWORD pid) {
-    if (!pid) return false;
-    wchar_t imagePath[MAX_PATH] = {};
-    if (!GetWindowProcessImageName(pid, imagePath, ARRAYSIZE(imagePath))) {
-        return false;
-    }
-    const wchar_t* baseName = wcsrchr(imagePath, L'\\');
-    baseName = baseName ? baseName + 1 : imagePath;
-    return _wcsicmp(baseName, L"StartMenuExperienceHost.exe") == 0;
-}
-
 bool IsStartMenuShellWindow(HWND hwnd, const WCHAR* className,
-                             ShellProcessKind processKind, DWORD pid) {
-    if (!hwnd || !className || processKind != ShellProcessKind::KnownShell) {
+                             ShellProcessKind processKind) {
+    if (!hwnd || !className || processKind != ShellProcessKind::StartMenu) {
         return false;
     }
-    if (!IsStartMenuExperienceHostProcess(pid)) return false;
 
     return !IsDesktopInfrastructureWindow(hwnd, className) &&
            !IsTaskbarWindow(hwnd);
@@ -973,6 +964,7 @@ bool IsStartMenuShellWindow(HWND hwnd, const WCHAR* className,
 struct StartMenuScanContext {
     const MonitorList* monitors;
     bool* visibleOnMonitor;
+    ShellProcessKindCache* processCache;
 };
 
 BOOL CALLBACK ScanVisibleStartMenuProc(HWND hwnd, LPARAM lParam) {
@@ -984,10 +976,14 @@ BOOL CALLBACK ScanVisibleStartMenuProc(HWND hwnd, LPARAM lParam) {
 
     WCHAR className[256] = {};
     if (GetClassNameW(hwnd, className, ARRAYSIZE(className)) == 0) return TRUE;
+    if (!IsShellSurfaceCandidateClass(className)) return TRUE;
 
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
-    if (!IsStartMenuExperienceHostProcess(pid)) return TRUE;
+    if (GetShellProcessKindCached(*context->processCache, pid) !=
+        ShellProcessKind::StartMenu) {
+        return TRUE;
+    }
     if (IsDesktopInfrastructureWindow(hwnd, className) ||
         IsTaskbarWindow(hwnd)) return TRUE;
 
@@ -1006,7 +1002,8 @@ bool ScanVisibleStartMenuOnce(const MonitorList& monitors,
                               bool* visibleOnMonitor) {
     if (!visibleOnMonitor) return false;
     for (size_t i = 0; i < monitors.count; ++i) visibleOnMonitor[i] = false;
-    StartMenuScanContext context = {&monitors, visibleOnMonitor};
+    ShellProcessKindCache processCache = {};
+    StartMenuScanContext context = {&monitors, visibleOnMonitor, &processCache};
     EnumWindows(ScanVisibleStartMenuProc, reinterpret_cast<LPARAM>(&context));
 
     bool anyVisible = false;
@@ -1020,14 +1017,17 @@ bool ScanVisibleStartMenuOnce(const MonitorList& monitors,
 }
 
 bool IsStartMenuCurrentlyVisible() {
+    ShellProcessKindCache processCache = {};
     DWORD shellPid = 0;
     HWND hwnd = nullptr;
     while ((hwnd = FindWindowExW(nullptr, hwnd, nullptr, nullptr)) != nullptr) {
         if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) continue;
         WCHAR className[256] = {};
         if (GetClassNameW(hwnd, className, ARRAYSIZE(className)) == 0) continue;
+        if (!IsShellSurfaceCandidateClass(className)) continue;
         GetWindowThreadProcessId(hwnd, &shellPid);
-        if (!IsStartMenuExperienceHostProcess(shellPid)) continue;
+        if (GetShellProcessKindCached(processCache, shellPid) !=
+            ShellProcessKind::StartMenu) continue;
         if (IsDesktopInfrastructureWindow(hwnd, className) ||
             IsTaskbarWindow(hwnd)) continue;
         return true;
@@ -1042,7 +1042,8 @@ bool IsShellSurfaceCandidateClass(const WCHAR* className) {
         IsAltTabClass(className) ||
         wcsncmp(className, L"XamlExplorerHostIslandWindow",
                 wcslen(L"XamlExplorerHostIslandWindow")) == 0 ||
-        wcscmp(className, L"Windows.UI.Core.CoreWindow") == 0;
+        wcscmp(className, L"Windows.UI.Core.CoreWindow") == 0 ||
+        wcscmp(className, L"Windows.UI.Composition.DesktopWindowContentBridge") == 0;
 }
 
 bool IsShellSurfaceEventWindow(HWND hwnd, const WCHAR* className,
@@ -1050,7 +1051,8 @@ bool IsShellSurfaceEventWindow(HWND hwnd, const WCHAR* className,
     if (!hwnd || !className) return false;
     const bool isShellProcess =
         processKind == ShellProcessKind::Explorer ||
-        processKind == ShellProcessKind::KnownShell;
+        processKind == ShellProcessKind::KnownShell ||
+        processKind == ShellProcessKind::StartMenu;
     if (!isShellProcess) return false;
 
     if (IsTaskbarPopupClass(className)) {
@@ -1062,6 +1064,10 @@ bool IsShellSurfaceEventWindow(HWND hwnd, const WCHAR* className,
     }
 
     if (IsAltTabClass(className)) return true;
+
+    if (wcscmp(className, L"Windows.UI.Composition.DesktopWindowContentBridge") == 0) {
+        return processKind == ShellProcessKind::StartMenu;
+    }
 
     if (wcsncmp(className, L"XamlExplorerHostIslandWindow",
                 wcslen(L"XamlExplorerHostIslandWindow")) == 0) {
@@ -1084,7 +1090,8 @@ bool IsShellSurfaceEventWindow(HWND hwnd, const WCHAR* className,
     }
 
     return wcscmp(className, L"Windows.UI.Core.CoreWindow") == 0 &&
-           processKind == ShellProcessKind::KnownShell;
+           (processKind == ShellProcessKind::KnownShell ||
+            processKind == ShellProcessKind::StartMenu);
 }
 
 bool IsShellSurfaceWindow(HWND hwnd, const WCHAR* className,
@@ -2641,28 +2648,18 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
             }
         }
 
-        if (hwnd == GetForegroundWindow()) {
-            WCHAR className[256] = {};
-            DWORD pid = 0;
-            GetWindowThreadProcessId(hwnd, &pid);
-            ShellProcessKindCache processCache = {};
-            const ShellProcessKind processKind =
-                GetShellProcessKindCached(processCache, pid);
-            if (GetClassNameW(hwnd, className, ARRAYSIZE(className)) != 0 &&
-                IsApplicationWindowCandidate(hwnd, className, processKind, true) &&
-                !IsDesktopInfrastructureWindow(hwnd, className) &&
-                !IsTaskbarWindow(hwnd)) {
-                g_foregroundTransitionWindow = hwnd;
-                g_foregroundTransitionMonitor =
-                    MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-                g_foregroundTransitionDeadline =
-                    GetTickCount64() + kTaskbarIntegrityGuardMs;
-                ArmTaskbarIntegrityGuard();
-            }
+        const bool foregroundLocationEvent =
+            hwnd == g_foregroundLocationWindow && hwnd == GetForegroundWindow();
+        if (foregroundLocationEvent) {
+            g_foregroundTransitionWindow = hwnd;
+            g_foregroundTransitionMonitor =
+                MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            g_foregroundTransitionDeadline =
+                GetTickCount64() + kTaskbarIntegrityGuardMs;
+            ArmTaskbarIntegrityGuard();
         }
 
-        if (ownerFound) PostRefresh();
-        else if (hwnd == GetForegroundWindow()) PostRefresh();
+        if (ownerFound || foregroundLocationEvent) PostRefresh();
         return;
     }
     if ((event == EVENT_OBJECT_SHOW || event == EVENT_OBJECT_HIDE) &&
@@ -2683,17 +2680,17 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
         return;
     }
     if (event == EVENT_OBJECT_SHOW || event == EVENT_OBJECT_HIDE) {
-        ArmWindowsAnimationsCloseProbeTimer();
         WCHAR className[256] = {};
         if (!hwnd || GetClassNameW(hwnd, className, ARRAYSIZE(className)) == 0) return;
+        if (!IsShellSurfaceCandidateClass(className)) return;
+        ArmWindowsAnimationsCloseProbeTimer();
         DWORD pid = 0;
         GetWindowThreadProcessId(hwnd, &pid);
         ShellProcessKindCache processCache = {};
         const ShellProcessKind processKind =
             GetShellProcessKindCached(processCache, pid);
         const bool isStartMenu =
-            IsStartMenuShellWindow(hwnd, className, processKind, pid);
-        if (!isStartMenu && !IsShellSurfaceCandidateClass(className)) return;
+            IsStartMenuShellWindow(hwnd, className, processKind);
         if (!isStartMenu &&
             !IsShellSurfaceEventWindow(hwnd, className, processKind)) {
             return;
@@ -2872,7 +2869,7 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
             }
 
             if (hwnd && IsStartMenuShellWindow(
-                    hwnd, foregroundClassName, foregroundProcessKind, pid)) {
+                    hwnd, foregroundClassName, foregroundProcessKind)) {
                 g_startMenuSessionActive = true;
                 g_startMenuSessionWindow = hwnd;
             } else if (g_startMenuSessionActive && !IsStartMenuCurrentlyVisible()) {
@@ -3642,15 +3639,6 @@ void Wh_ModAfterInit() {
     swprintf_s(commandLine, L"\"%s\" -tool-mod \"%s\"", currentProcessPath,
                WH_MOD_ID);
 
-    HMODULE kernelModule = GetModuleHandle(L"kernelbase.dll");
-    if (!kernelModule) {
-        kernelModule = GetModuleHandle(L"kernel32.dll");
-        if (!kernelModule) {
-            Wh_Log(L"No kernelbase.dll/kernel32.dll");
-            return;
-        }
-    }
-
     using CreateProcessInternalW_t = BOOL(WINAPI*)(
         HANDLE hUserToken, LPCWSTR lpApplicationName, LPWSTR lpCommandLine,
         LPSECURITY_ATTRIBUTES lpProcessAttributes,
@@ -3659,22 +3647,38 @@ void Wh_ModAfterInit() {
         LPSTARTUPINFOW lpStartupInfo,
         LPPROCESS_INFORMATION lpProcessInformation,
         PHANDLE hRestrictedUserToken);
-    CreateProcessInternalW_t pCreateProcessInternalW =
-        (CreateProcessInternalW_t)GetProcAddress(kernelModule,
-                                                 "CreateProcessInternalW");
-    if (!pCreateProcessInternalW) {
-        Wh_Log(L"No CreateProcessInternalW");
-        return;
+
+    CreateProcessInternalW_t pCreateProcessInternalW = nullptr;
+    HMODULE kernelModule = GetModuleHandle(L"kernelbase.dll");
+    if (!kernelModule) {
+        kernelModule = GetModuleHandle(L"kernel32.dll");
+    }
+    if (kernelModule) {
+        pCreateProcessInternalW =
+            (CreateProcessInternalW_t)GetProcAddress(kernelModule,
+                                                     "CreateProcessInternalW");
     }
 
     STARTUPINFO si{
         .cb = sizeof(STARTUPINFO),
         .dwFlags = STARTF_FORCEOFFFEEDBACK,
     };
-    PROCESS_INFORMATION pi;
-    if (!pCreateProcessInternalW(nullptr, currentProcessPath, commandLine,
-                                 nullptr, nullptr, FALSE, NORMAL_PRIORITY_CLASS,
-                                 nullptr, nullptr, &si, &pi, nullptr)) {
+    PROCESS_INFORMATION pi{};
+    BOOL created = FALSE;
+    if (pCreateProcessInternalW) {
+        created = pCreateProcessInternalW(
+            nullptr, currentProcessPath, commandLine,
+            nullptr, nullptr, FALSE, NORMAL_PRIORITY_CLASS,
+            nullptr, nullptr, &si, &pi, nullptr);
+    } else {
+        Wh_Log(L"CreateProcessInternalW unavailable; using documented CreateProcessW fallback");
+        created = CreateProcessW(
+            currentProcessPath, commandLine,
+            nullptr, nullptr, FALSE, NORMAL_PRIORITY_CLASS,
+            nullptr, nullptr, &si, &pi);
+    }
+
+    if (!created) {
         Wh_Log(L"CreateProcess failed");
         return;
     }
