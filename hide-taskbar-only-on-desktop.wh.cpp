@@ -2,7 +2,7 @@
 // @id              hide-taskbar-only-on-desktop
 // @name            Hide Taskbar Only on Desktop
 // @description     Hides selected taskbars when their displays are desktop-only or in detected fullscreen
-// @version         8.4.0
+// @version         8.5.0
 // @author          Sahil Dashoni
 // @github          https://github.com/Sahil-Dashoni
 // @include         windhawk.exe
@@ -2616,6 +2616,12 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
     }
     if (event == EVENT_OBJECT_DESTROY &&
         idObject == OBJID_WINDOW && idChild == CHILDID_SELF) {
+        // A minimize target can disappear before the post-minimize guard
+        // expires. Clear the stored HWND at destruction time so Windows HWND
+        // reuse cannot make an unrelated new window inherit the suppression.
+        if (hwnd == g_minimizingWindow) {
+            g_minimizingWindow = nullptr;
+        }
         bool isFullscreenOwner = false;
         for (size_t i = 0; i < kMaxMonitorNumbers; ++i) {
             if (g_fullscreenOwners[i].hwnd == hwnd) {
