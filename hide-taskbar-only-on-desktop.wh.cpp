@@ -2,7 +2,7 @@
 // @id              hide-taskbar-only-on-desktop
 // @name            Hide Taskbar Only on Desktop
 // @description     Hides selected taskbars when their displays are desktop-only or in detected fullscreen
-// @version         8.2.0
+// @version         8.3.0
 // @author          Sahil Dashoni
 // @github          https://github.com/Sahil-Dashoni
 // @include         windhawk.exe
@@ -300,7 +300,8 @@ navigation continue to take priority over transition protection.
   - monitor15: Display 15
   - monitor16: Display 16
 */
-// ==/WindhawkModSettings==#include <windows.h>
+// ==/WindhawkModSettings==
+#include <windows.h>
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <windhawk_utils.h>
@@ -2740,6 +2741,14 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
     if (event == EVENT_OBJECT_DESTROY &&
         idObject == OBJID_WINDOW && idChild == CHILDID_SELF) {
 
+        bool isFullscreenOwner = false;
+        for (size_t i = 0; i < kMaxMonitorNumbers; ++i) {
+            if (g_fullscreenOwners[i].hwnd == hwnd) {
+                isFullscreenOwner = true;
+                break;
+            }
+        }
+
         const bool isLastForegroundApplication =
             hwnd && hwnd == g_lastForegroundApplicationWindow;
         const bool isPreviousForegroundApplication =
@@ -2757,8 +2766,13 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
         }
 
         if (!destroyedApplicationMonitor && !isKeyboardTaskbar &&
-            !isTrackedTaskbar && !isStartMenuSessionWindow) {
+            !isTrackedTaskbar && !isStartMenuSessionWindow &&
+            !isFullscreenOwner) {
             return;
+        }
+
+        if (isFullscreenOwner) {
+            ClearFullscreenOwnersForWindow(hwnd);
         }
 
         ArmWindowsAnimationsCloseProbeTimer();
@@ -3059,10 +3073,11 @@ LRESULT CALLBACK WorkerMessageWindowProc(HWND hwnd, UINT message, WPARAM wParam,
         return 0;
     }
     if (message == WM_TIMER && wParam == kWindowsAnimationsCloseProbeTimerId) {
+        const bool wasActive = g_windowsAnimationsCloseActive;
         MonitorList monitors = GetCurrentMonitors();
         const bool closeActive = RefreshWindowsAnimationsCloseGuard(monitors);
 
-        if (closeActive) {
+        if (closeActive != wasActive) {
             UpdateTaskbarState();
         }
 
@@ -3502,7 +3517,7 @@ bool WaitForThreadWithTimeout(HANDLE thread, DWORD timeoutMs, const wchar_t* thr
     if (result == WAIT_TIMEOUT) {
         Wh_Log(L"%s thread did not exit within %lu ms", threadName, timeoutMs);
     } else {
-        Wh_Log(L"WaitForSingleObject failed for %s thread: %lu", threadName, result);
+        Wh_Log(L"WaitForSingleObject failed for %s thread: %lu", threadName, GetLastError());
     }
     return false;
 }
