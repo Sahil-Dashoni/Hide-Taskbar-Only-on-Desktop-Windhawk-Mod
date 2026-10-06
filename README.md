@@ -28,7 +28,7 @@ The taskbar hides when the display returns to the desktop and can be revealed by
 
 - **Independent multi-monitor behavior**
   - Each selected display is evaluated separately.
-  - Applications spanning multiple displays are considered on every display they intersect.
+  - Applications spanning multiple displays are considered on every display they meaningfully intersect.
   - Maximized windows use the monitor assignment provided by Windows.
 
 - **Borderless fullscreen detection**
@@ -49,11 +49,18 @@ The taskbar hides when the display returns to the desktop and can be revealed by
   - Tracks taskbar control focus separately from normal foreground-window state.
   - Keeps the taskbar visible briefly across transient focus transitions between taskbar controls.
   - Mouse-driven taskbar interaction is not treated as keyboard activation.
+  - Recent taskbar focus caused by an application closing is distinguished from explicit keyboard taskbar navigation on the same display.
 
 - **Windows shell interaction handling**
   - Relevant Windows shell surfaces are handled separately from normal application-window detection.
   - This includes supported Start menu, taskbar menus and popups, tray and notification overflow, Notification/Quick Settings, and Alt+Tab/task-switching UI.
   - Shell interaction can temporarily reveal a taskbar even while fullscreen ownership is active.
+  - Shell surfaces that change visibility through DWM cloaking and uncloaking are also handled so taskbar state can be refreshed without waiting for an unrelated window event.
+
+- **Application transition handling**
+  - Minimize and restore transitions are tracked separately to avoid stale transition state during application lifecycle changes.
+  - Application close handoff is tracked so automatic focus changes to a taskbar do not incorrectly trigger keyboard-taskbar reveal behavior.
+  - Transition handling is designed to preserve taskbar state through short Explorer, shell, and animation lifecycle races.
 
 - **Direct taskbar control**
   - The mod uses layered-window transparency and click-through behavior to hide taskbars.
@@ -165,7 +172,7 @@ This mod has a different primary state model:
 
 > **Desktop-only state is evaluated independently for each display, and the taskbar becomes immediately eligible for hiding when that display has no relevant application, subject to explicit hover, shell, or keyboard reveals.**
 
-It also provides per-display fullscreen tracking, shell-surface handling, keyboard taskbar interaction, minimize-transition handling, and recovery logic around that state model.
+It also provides per-display fullscreen tracking, shell-surface handling, keyboard taskbar interaction, minimize/restore transition handling, application close-focus handling, cloak/uncloak handling, and recovery logic around that state model.
 
 The two mods should not be used on the same taskbar because both modify the taskbar window's transparency/style state.
 
@@ -183,9 +190,11 @@ For each selected display, the mod:
 6. Checks hover and keyboard taskbar interaction state.
 7. Applies the resulting visibility state to that display's taskbar.
 
-Fullscreen tracking uses foreground, move/size, owner-location, and fullscreen validation events. A periodic safety refresh provides a recovery path for transitions that do not produce a single reliable event.
+Fullscreen tracking uses foreground, move/size, owner-location, and fullscreen validation events. Minimize/restore lifecycle events and relevant shell cloak/uncloak events are also used to keep taskbar state synchronized during short window-state transitions. A periodic safety refresh provides a recovery path for transitions that do not produce a single reliable event.
 
 Taskbar control focus is tracked through an out-of-context accessibility focus hook so keyboard navigation such as **Win+T** and **Win+B** can reveal a taskbar even when Windows has not yet made that taskbar the foreground window.
+
+Recent taskbar focus caused by an application close is associated with the application's display and is not treated as explicit keyboard taskbar activation when it matches the automatic close-focus conditions.
 
 The hidden taskbar is made transparent and click-through rather than being switched to Windows' native auto-hide mode.
 
@@ -219,6 +228,8 @@ Supported shell handling includes relevant:
 - Desktop shell surfaces
 
 Shell surfaces are identified using relevant window classes together with the owning Windows shell process where required.
+
+Shell visibility changes caused by DWM cloaking or uncloaking are also observed so the taskbar state can be refreshed when a shell surface does not generate a normal show/hide event.
 
 Windows shell implementation details can change between Windows releases, so additional classes or processes may need to be added for future Windows versions.
 
@@ -255,6 +266,7 @@ The mod refreshes taskbar and display state when relevant changes occur, includi
 - Monitor addition or removal
 - Display configuration changes
 - Windhawk setting changes
+- Relevant shell cloak and uncloak changes
 
 Taskbars are rediscovered rather than assuming that their window handles remain unchanged.
 
@@ -265,11 +277,12 @@ The main application/display scan runs in the dedicated tool process rather than
 The mod uses:
 
 - A dedicated worker thread for state management
-- Event-driven refreshes for relevant changes
+- Event-driven refreshes for relevant changes, including shell cloak/uncloak transitions
 - A periodic safety refresh for missed or unusual transitions
 - A lightweight cursor-sampling thread for hover detection
 - Adaptive cursor sampling when hover tracking is not required
-- One-shot timers for hover dismissal, fullscreen validation, and keyboard taskbar release
+- One-shot timers for hover dismissal, fullscreen validation, keyboard taskbar release, and short transition checks
+- Targeted Windows Animations close-session probing only when an animation ghost is shown
 - A narrow Explorer-side visibility hook for secondary-taskbar flash prevention
 
 ## Limitations
