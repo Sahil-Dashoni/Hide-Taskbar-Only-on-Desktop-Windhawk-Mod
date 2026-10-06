@@ -2,7 +2,7 @@
 // @id              hide-taskbar-only-on-desktop
 // @name            Hide Taskbar Only on Desktop
 // @description     Hides selected taskbars when their displays are desktop-only or in detected fullscreen
-// @version         8.5.0
+// @version         8.6.0
 // @author          Sahil Dashoni
 // @github          https://github.com/Sahil-Dashoni
 // @include         windhawk.exe
@@ -39,9 +39,9 @@ separately. Each display is evaluated independently.
 - Recovery after taskbar recreation or tool-process restart
 - Optional stable monitor interface-name mapping
 - Optional compatibility with the `windows-animations` Windhawk mod
-- Cross-monitor animation protection for minimize, restore/maximize, and close
+- Cross-monitor animation protection for minimize, restore/maximize, close, and shell-cloak
 - Minimize-aware filtering of animation-session surfaces to avoid delaying
-  desktop-only taskbar hiding when the last application is minimized
+  desktop-only taskbar hiding when the last application is minimized or restored
 
 ## Settings
 
@@ -128,12 +128,15 @@ intentionally unchanged.
 
 Fullscreen ownership is tracked per display for borderless monitor-sized
 windows. Foreground, move/size, per-owner location, and recognized shell-surface
-events update state promptly, including geometry changes while the owner is in
-the background. Cached fullscreen ownership tolerates transient visibility or
+show/hide/cloak events update state promptly, including geometry changes while
+the owner is in the background. Cached fullscreen ownership tolerates transient visibility or
 cloak changes while focus moves between displays and remains active while the
 owner still matches fullscreen geometry.
 
-Short validation and integrity rechecks cover lifecycle races. Cross-monitor
+Short validation and integrity rechecks cover lifecycle races. Minimize and
+restore transitions track their actual lifecycle events so keyboard taskbar
+navigation is not unnecessarily suppressed after a completed minimize.
+Cross-monitor
 window occupancy ignores tiny edge slivers caused by invisible DWM resize
 borders while retaining genuine spanning-window activity. Taskbar control focus
 is tracked through out-of-context accessibility focus events, so keyboard
@@ -148,8 +151,8 @@ interaction is not misclassified as keyboard navigation.
 This mod is **compatible with the `windows-animations` Windhawk mod**, while
 remaining fully functional without it.
 
-The integration is optional and uses only versioned window properties when they
-are present:
+The integration is optional and recognizes the window properties exposed by
+`windows-animations` when they are present:
 
 - `windows-animations.AnimationSessionV1`
 - `windows-animations.Closed`
@@ -168,12 +171,16 @@ During close animations, the close-session guard associates the animation with
 the application's monitor and prevents transient shell or animation windows on
 another desktop-only display from revealing that display's taskbar. The guard
 also handles the foreground/destroy ordering Windows can use during animated
-window teardown.
+window teardown. When an application closes without a Windows Animations close
+session, the mod also recognizes the short automatic taskbar-focus handoff and
+does not treat it as keyboard taskbar navigation.
 
-The close-session probe runs in short 8 ms bursts around relevant window and
-shell lifecycle events rather than polling continuously while the desktop is
-idle. When a close session is detected, probing remains active through the close
-guard grace period.
+The close-session probe runs only when the `windows-animations` mod shows an
+`AnimationGhostV1` surface, rather than polling on unrelated window events.
+Recognized shell surfaces are also refreshed on DWM cloak and uncloak events so
+shell UI that closes by cloaking does not wait for an unrelated event. It
+uses a short 16 ms burst while a close session is present, with the existing
+grace period keeping the probe alive through the end of the transition.
 
 Normal hover reveal, Start-menu access, and explicit keyboard taskbar
 navigation continue to take priority over transition protection.
@@ -321,10 +328,11 @@ constexpr UINT_PTR kKeyboardTaskbarReleaseTimerId = 5;
 constexpr UINT_PTR kWindowTransitionValidationTimerId = 6;
 constexpr UINT_PTR kTaskbarIntegrityTimerId = 7;
 constexpr UINT_PTR kWindowsAnimationsCloseProbeTimerId = 8;
-constexpr DWORD kWindowsAnimationsCloseProbeIntervalMs = 8;
+constexpr DWORD kWindowsAnimationsCloseProbeIntervalMs = 16;
 constexpr DWORD kWindowsAnimationsCloseProbeBurstMs = 750;
 constexpr DWORD kWindowsAnimationsCloseGuardGraceMs = 250;
 constexpr DWORD kTaskbarIntegrityGuardMs = 1200;
+constexpr DWORD kTaskbarIntegrityGuardIntervalMs = 16;
 constexpr DWORD kKeyboardTaskbarReleaseDelayMs = 350;
 constexpr UINT kTaskbarFrameChangeFlags =
     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
@@ -368,6 +376,7 @@ HWINEVENTHOOK g_minimizeHook = nullptr;
 HWINEVENTHOOK g_moveHook = nullptr;
 HWINEVENTHOOK g_fullscreenLocationHooks[kMaxMonitorNumbers] = {};
 HWINEVENTHOOK g_shellSurfaceHook = nullptr;
+HWINEVENTHOOK g_shellSurfaceCloakHook = nullptr;
 HWINEVENTHOOK g_taskbarFocusHook = nullptr;
 HWINEVENTHOOK g_windowDestroyHook = nullptr;
 HWINEVENTHOOK g_foregroundLocationHook = nullptr;
@@ -394,8 +403,6 @@ constexpr wchar_t kTaskbarOriginalLayeredFlagsProp[] = L"windhawk-hide-taskbar-o
 constexpr wchar_t kTaskbarOriginalLayeredAttributesValidProp[] =
     L"windhawk-hide-taskbar-only-on-desktop-original-layered-valid";
 constexpr LONG_PTR kModTaskbarExStyleBits = WS_EX_LAYERED | WS_EX_TRANSPARENT;
-extern bool g_windowsAnimationsCloseActive;
-extern size_t g_windowsAnimationsCloseMonitorCount;
 
 bool GetWindowExStyle(HWND hwnd, LONG_PTR* exStyle) {
     if (!hwnd || !exStyle) return false;
@@ -519,6 +526,9 @@ bool MakeTaskbarTransparent(HWND hwnd, bool hide) {
             RemoveTaskbarOwnershipProperties(hwnd);
             return false;
         }
+        // Make the taskbar layered first, but keep it input-enabled while it
+        // is still visible. Apply alpha=0 before adding WS_EX_TRANSPARENT so
+        // there is no interval where an opaque taskbar is click-through.
         SetLastError(ERROR_SUCCESS);
         LONG_PTR previousExStyle = SetWindowLongPtrW( hwnd, GWL_EXSTYLE, exStyle | WS_EX_LAYERED );
         if (previousExStyle == 0 && GetLastError() != ERROR_SUCCESS) {
@@ -621,17 +631,30 @@ ULONGLONG g_windowsAnimationsCloseProbeDeadline = 0;
 HWND g_foregroundTransitionWindow = nullptr;
 HMONITOR g_foregroundTransitionMonitor = nullptr;
 ULONGLONG g_foregroundTransitionDeadline = 0;
+// Close/restore transitions can make the foreground jump through shell windows.
+// Keep a short-lived application history so those handoffs don't reveal a
+// taskbar that was supposed to remain hidden.
 HWND g_lastForegroundApplicationWindow = nullptr;
 HMONITOR g_lastForegroundApplicationMonitor = nullptr;
 HWND g_previousForegroundApplicationWindow = nullptr;
 HMONITOR g_previousForegroundApplicationMonitor = nullptr;
+// Windows can automatically move focus to Shell_TrayWnd after the last
+// application window disappears. Keep a short record of that real departure
+// so the resulting accessibility focus is not treated as keyboard navigation.
+constexpr ULONGLONG kTaskbarAutomaticFocusSuppressMs = 1200;
+HWND g_recentlyDepartedApplicationWindow = nullptr;
+DWORD g_recentlyDepartedApplicationProcessId = 0;
+HMONITOR g_recentlyDepartedApplicationMonitor = nullptr;
+ULONGLONG g_recentlyDepartedApplicationTick = 0;
 bool g_taskbarForegroundKeyboardActivated = false;
 HWND g_keyboardTaskbarWindow = nullptr;
 bool g_taskbarForegroundAfterShell = false;
 bool g_lastForegroundWasShellSurface = false;
 bool g_startMenuSessionActive = false;
 HWND g_startMenuSessionWindow = nullptr;
-ULONGLONG g_lastMinimizeEventTick = 0;
+ULONGLONG g_lastMinimizeTransitionTick = 0;
+// True only while a minimize/restore transition is still in flight. The
+// transition tick remains briefly afterward for post-transition reassertion.
 HWND g_minimizingWindow = nullptr;
 bool g_minimizeInProgress = false;
 struct FullscreenMonitorOwner {
@@ -675,13 +698,12 @@ void ArmWindowTransitionValidation();
 void ArmTaskbarIntegrityGuard(DWORD durationMs = kTaskbarIntegrityGuardMs);
 
 void CancelTaskbarIntegrityGuard();
-bool ScanWindowsAnimationsCloseOnce(const MonitorList& monitors,
-                                    HMONITOR* closingMonitors,
+bool ScanWindowsAnimationsCloseOnce(HMONITOR* closingMonitors,
                                     size_t* closingMonitorCount);
 
 bool IsMonitorInWindowsAnimationsCloseGuard(HMONITOR monitor);
 
-bool RefreshWindowsAnimationsCloseGuard(const MonitorList& monitors);
+bool RefreshWindowsAnimationsCloseGuard();
 void ArmWindowsAnimationsCloseProbeTimer(
     DWORD durationMs = kWindowsAnimationsCloseProbeBurstMs);
 
@@ -974,6 +996,7 @@ BOOL CALLBACK ScanVisibleStartMenuProc(HWND hwnd, LPARAM lParam) {
     WCHAR className[256] = {};
     if (GetClassNameW(hwnd, className, ARRAYSIZE(className)) == 0) return TRUE;
     if (!IsShellSurfaceCandidateClass(className)) return TRUE;
+    if (IsWindowCloaked(hwnd)) return TRUE;
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
     if (GetShellProcessKindCached(*context->processCache, pid) !=
@@ -1018,6 +1041,7 @@ bool IsStartMenuCurrentlyVisible() {
         WCHAR className[256] = {};
         if (GetClassNameW(hwnd, className, ARRAYSIZE(className)) == 0) continue;
         if (!IsShellSurfaceCandidateClass(className)) continue;
+        if (IsWindowCloaked(hwnd)) continue;
         GetWindowThreadProcessId(hwnd, &shellPid);
         if (GetShellProcessKindCached(processCache, shellPid) !=
             ShellProcessKind::StartMenu) continue;
@@ -1109,7 +1133,7 @@ bool IsApplicationWindowCandidate(
     HWND hwnd,
     const WCHAR* className,
     ShellProcessKind processKind,
-    bool allowWindowsAnimationsSessionCloak = false) {
+    bool allowCloaked = false) {
     if ( !hwnd || !className || !IsWindowVisible(hwnd) || IsIconic(hwnd) ) return false;
     LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
     if ( GetWindow(hwnd, GW_OWNER) != nullptr && !(exStyle & WS_EX_APPWINDOW) ) return false;
@@ -1117,7 +1141,7 @@ bool IsApplicationWindowCandidate(
     if (IsShellSurfaceWindow( hwnd, className, processKind ) || IsTaskbarPopupClass(className)) return false;
     if (IsShellChromeClass(className) || IsTaskbarWindow(hwnd)) return false;
     if (exStyle & WS_EX_TOOLWINDOW) return false;
-    return allowWindowsAnimationsSessionCloak || !IsWindowCloaked(hwnd);
+    return allowCloaked || !IsWindowCloaked(hwnd);
 }
 constexpr wchar_t kWindowsAnimationsSessionProp[] =
     L"windows-animations.AnimationSessionV1";
@@ -1143,8 +1167,8 @@ bool IsWindowsAnimationsMinimizeSuppressedWindow(HWND hwnd) {
     if (!hwnd || !g_minimizingWindow) return false;
     const bool minimizeTransitionActive =
         g_minimizeInProgress ||
-        (g_lastMinimizeEventTick != 0 &&
-         GetTickCount64() - g_lastMinimizeEventTick <
+        (g_lastMinimizeTransitionTick != 0 &&
+         GetTickCount64() - g_lastMinimizeTransitionTick <
              kTaskbarIntegrityGuardMs);
     if (!minimizeTransitionActive) return false;
     if (hwnd == g_minimizingWindow) return true;
@@ -1170,12 +1194,10 @@ bool IsWindowsAnimationsActiveSessionCandidate(
     return true;
 }
 struct WindowsAnimationsCloseScanContext {
-    const MonitorList* monitors;
     HMONITOR* closingMonitors;
     size_t* closingMonitorCount;
 };
 bool AddWindowsAnimationsCloseMonitor(HWND target,
-                                       const MonitorList& monitors,
                                        HMONITOR* closingMonitors,
                                        size_t* closingMonitorCount) {
     if (!target || !closingMonitors || !closingMonitorCount ||
@@ -1197,33 +1219,31 @@ bool AddWindowsAnimationsCloseMonitor(HWND target,
 BOOL CALLBACK ScanWindowsAnimationsCloseProc(HWND hwnd, LPARAM lParam) {
     auto* context =
         reinterpret_cast<WindowsAnimationsCloseScanContext*>(lParam);
-    if (!context || !context->monitors || !context->closingMonitors ||
+    if (!context || !context->closingMonitors ||
         !context->closingMonitorCount || !hwnd) {
         return TRUE;
     }
     AddWindowsAnimationsCloseMonitor(
-        hwnd, *context->monitors, context->closingMonitors,
-        context->closingMonitorCount);
+        hwnd, context->closingMonitors, context->closingMonitorCount);
     const HANDLE ghostTarget =
         GetPropW(hwnd, kWindowsAnimationsAnimationGhostProp);
     if (ghostTarget) {
         HWND target = reinterpret_cast<HWND>(ghostTarget);
         if (target && IsWindow(target)) {
             AddWindowsAnimationsCloseMonitor(
-                target, *context->monitors, context->closingMonitors,
+                target, context->closingMonitors,
                 context->closingMonitorCount);
         }
     }
     return TRUE;
 }
-bool ScanWindowsAnimationsCloseOnce(const MonitorList& monitors,
-                                    HMONITOR* closingMonitors,
+bool ScanWindowsAnimationsCloseOnce(HMONITOR* closingMonitors,
                                     size_t* closingMonitorCount) {
     if (!closingMonitors || !closingMonitorCount) return false;
     *closingMonitorCount = 0;
     for (size_t i = 0; i < kMaxTaskbars; ++i) closingMonitors[i] = nullptr;
     WindowsAnimationsCloseScanContext context = {
-        &monitors, closingMonitors, closingMonitorCount};
+        closingMonitors, closingMonitorCount};
     EnumWindows(ScanWindowsAnimationsCloseProc, reinterpret_cast<LPARAM>(&context));
     return *closingMonitorCount != 0;
 }
@@ -1236,11 +1256,13 @@ bool IsMonitorInWindowsAnimationsCloseGuard(HMONITOR monitor) {
     return false;
 }
 
-bool RefreshWindowsAnimationsCloseGuard(const MonitorList& monitors) {
+// The close-session scan is intentionally burst-based: a SHOW of an animation
+// ghost arms it, and the grace period keeps it alive until the close settles.
+bool RefreshWindowsAnimationsCloseGuard() {
     HMONITOR closingMonitors[kMaxTaskbars] = {};
     size_t closingMonitorCount = 0;
     const bool active = ScanWindowsAnimationsCloseOnce(
-        monitors, closingMonitors, &closingMonitorCount);
+        closingMonitors, &closingMonitorCount);
     const ULONGLONG now = GetTickCount64();
     if (active) {
         g_windowsAnimationsCloseActive = true;
@@ -1251,7 +1273,11 @@ bool RefreshWindowsAnimationsCloseGuard(const MonitorList& monitors) {
         }
         g_windowsAnimationsCloseLastSeenTick = now;
         ArmTaskbarIntegrityGuard();
-        ArmWindowsAnimationsCloseProbeTimer();
+        const ULONGLONG probeDeadline =
+            now + kWindowsAnimationsCloseProbeBurstMs;
+        if (probeDeadline > g_windowsAnimationsCloseProbeDeadline) {
+            g_windowsAnimationsCloseProbeDeadline = probeDeadline;
+        }
         return true;
     }
     if (g_windowsAnimationsCloseActive &&
@@ -1471,8 +1497,7 @@ void RefreshFullscreenWindowCache( const MonitorList& monitors, ShellProcessKind
     NoteForegroundFullscreenWindow( monitors, foreground, processCache );
 }
 bool IsMeaningfulMonitorIntersection(const RECT& windowRect,
-                                      const RECT& monitorRect,
-                                      RECT* intersectionOut = nullptr) {
+                                      const RECT& monitorRect) {
     RECT intersection = {};
     if (!IntersectRect(&intersection, &windowRect, &monitorRect)) {
         return false;
@@ -1497,9 +1522,6 @@ bool IsMeaningfulMonitorIntersection(const RECT& windowRect,
         height >= kMinCrossMonitorDimension &&
         windowArea != 0 &&
         intersectionArea * 100 >= windowArea * kMinWindowCoveragePercent;
-    if (meaningful && intersectionOut) {
-        *intersectionOut = intersection;
-    }
     return meaningful;
 }
 
@@ -1540,10 +1562,8 @@ BOOL CALLBACK ScanWindowsWithMonitorsProc(HWND hwnd, LPARAM lParam) {
             sessionRect.right > sessionRect.left &&
             sessionRect.bottom > sessionRect.top) {
             for (size_t i = 0; i < context->monitors->count; ++i) {
-                RECT intersection = {};
                 if (IsMeaningfulMonitorIntersection(
-                        sessionRect, context->monitors->entries[i].rect,
-                        &intersection)) {
+                        sessionRect, context->monitors->entries[i].rect)) {
                     context->result->applicationOnMonitor[i] = true;
                 }
             }
@@ -1578,9 +1598,8 @@ BOOL CALLBACK ScanWindowsWithMonitorsProc(HWND hwnd, LPARAM lParam) {
         return TRUE;
     }
     for ( size_t i = 0; i < context->monitors->count; ++i ) {
-        RECT intersection = {};
         if (IsMeaningfulMonitorIntersection(
-                rect, context->monitors->entries[i].rect, &intersection)) {
+                rect, context->monitors->entries[i].rect)) {
             context->result->applicationOnMonitor[i] = true;
         }
     }
@@ -2003,7 +2022,8 @@ void ArmTaskbarIntegrityGuard(DWORD durationMs) {
         g_taskbarIntegrityDeadline = deadline;
     }
     CaptureHiddenTaskbarsForIntegrityGuard();
-    if (!SetTimer(g_workerMessageWindow, kTaskbarIntegrityTimerId, 8, nullptr)) {
+    if (!SetTimer(g_workerMessageWindow, kTaskbarIntegrityTimerId,
+                  kTaskbarIntegrityGuardIntervalMs, nullptr)) {
         Wh_Log(L"Taskbar integrity timer could not be armed");
     }
 }
@@ -2046,7 +2066,7 @@ void UpdateTaskbarState() {
     WindowScanResult scan = {};
     ScanWindowsOnce(monitors, scan);
     const bool windowsAnimationsCloseActive =
-        RefreshWindowsAnimationsCloseGuard(monitors);
+        RefreshWindowsAnimationsCloseGuard();
     bool startMenuVisibleOnMonitor[kMaxMonitorNumbers] = {};
     const bool startMenuCurrentlyVisible =
         ScanVisibleStartMenuOnce(monitors, startMenuVisibleOnMonitor);
@@ -2101,13 +2121,11 @@ void UpdateTaskbarState() {
         }
     }
     const bool postMinimizeTaskbarForeground =
-        g_lastMinimizeEventTick != 0 &&
-        GetTickCount64() - g_lastMinimizeEventTick < 1000;
-    if (g_lastMinimizeEventTick != 0 && !postMinimizeTaskbarForeground) {
-        g_lastMinimizeEventTick = 0;
+        g_lastMinimizeTransitionTick != 0 &&
+        GetTickCount64() - g_lastMinimizeTransitionTick < 1000;
+    if (g_lastMinimizeTransitionTick != 0 && !postMinimizeTaskbarForeground) {
+        g_lastMinimizeTransitionTick = 0;
     }
-    const bool taskbarForegroundKeyboardActivated =
-        g_taskbarForegroundKeyboardActivated;
     POINT cursorPoint = {};
     HMONITOR cursorMonitor = nullptr;
     if (GetCursorPos(&cursorPoint)) {
@@ -2116,7 +2134,7 @@ void UpdateTaskbarState() {
     }
     const bool taskbarForegroundAfterShell = g_taskbarForegroundAfterShell;
     if (!postMinimizeTaskbarForeground && !taskbarForegroundAfterShell &&
-        taskbarForegroundKeyboardActivated && g_keyboardTaskbarWindow) {
+        g_taskbarForegroundKeyboardActivated && g_keyboardTaskbarWindow) {
         for (size_t i = 0; i < g_taskbarStateCount; ++i) {
             if (g_taskbarStates[i].hwnd != g_keyboardTaskbarWindow) continue;
             g_taskbarStates[i].desktopOnly = false;
@@ -2171,8 +2189,8 @@ void UpdateTaskbarState() {
         }
         if (now >= g_hoverDeadline) {
             const bool ignorePostMinimizeShellPopup =
-                g_lastMinimizeEventTick != 0 &&
-                GetTickCount64() - g_lastMinimizeEventTick < 1000;
+                g_lastMinimizeTransitionTick != 0 &&
+                GetTickCount64() - g_lastMinimizeTransitionTick < 1000;
             if (!ignorePostMinimizeShellPopup) {
                 ScanVisibleShellPopupsOnce(monitors, shellPopups);
             }
@@ -2209,9 +2227,12 @@ void UpdateTaskbarState() {
             !IsMonitorFullscreen(state.monitor);
         const bool startMenuKeepsVisible =
             monitorIndex >= 0 && startMenuVisibleOnMonitor[monitorIndex];
-        const bool transitionHoldActive = transitionHoldForCrossMonitor;
+        const bool secondaryMonitorHasRealActivity =
+            monitorIndex >= 0 &&
+            (scan.applicationOnMonitor[monitorIndex] ||
+             scan.fullscreenOnMonitor[monitorIndex]);
         const bool keyboardTaskbarKeepsVisible =
-            taskbarForegroundKeyboardActivated &&
+            g_taskbarForegroundKeyboardActivated &&
             g_keyboardTaskbarWindow == state.hwnd;
         const bool closeGuardKeepsSecondaryHidden =
             windowsAnimationsCloseActive &&
@@ -2226,22 +2247,21 @@ void UpdateTaskbarState() {
         if (closeGuardKeepsSecondaryHidden) {
             state.desktopOnly = true;
         }
-        if (transitionHoldActive &&
-            state.monitor != g_foregroundTransitionMonitor &&
-            ShouldHideTaskbar(state) &&
-            !hoverKeepsVisible &&
-            !startMenuKeepsVisible &&
-            !keyboardTaskbarKeepsVisible) {
-            state.desktopOnly = true;
-        }
+        // A transition on the primary display must not override the
+        // independent state of another display that still has a real app or
+        // fullscreen owner. The integrity hold is only for a genuinely
+        // desktop-only secondary monitor.
         const bool transitionKeepsSecondaryHidden =
-            transitionHoldActive &&
+            transitionHoldForCrossMonitor &&
             state.monitor != g_foregroundTransitionMonitor &&
-            state.desktopOnly &&
+            !secondaryMonitorHasRealActivity &&
             ShouldHideTaskbar(state) &&
             !hoverKeepsVisible &&
             !startMenuKeepsVisible &&
             !keyboardTaskbarKeepsVisible;
+        if (transitionKeepsSecondaryHidden) {
+            state.desktopOnly = true;
+        }
         bool show =
             !state.desktopOnly || !ShouldHideTaskbar(state) || shellSurface ||
             hoverKeepsVisible || popupKeepsVisible || startMenuKeepsVisible;
@@ -2276,8 +2296,24 @@ void CancelWindowsAnimationsCloseProbeTimer() {
     }
 }
 
+// Keep validation tied to an actual/recent transition. Outside these short
+// windows a full UpdateTaskbarState() pass is unnecessary and expensive.
+bool IsWindowTransitionValidationActive() {
+    const ULONGLONG now = GetTickCount64();
+    return
+        IsForegroundTransitionHoldActive(g_foregroundTransitionMonitor) ||
+        g_windowsAnimationsCloseActive || g_minimizeInProgress ||
+        (g_lastMinimizeTransitionTick != 0 &&
+         now - g_lastMinimizeTransitionTick < 1000);
+}
+
 void ArmWindowTransitionValidation() {
     if (!g_workerMessageWindow) return;
+    if (!IsWindowTransitionValidationActive()) {
+        g_windowTransitionValidationAttempt = 0;
+        KillTimer(g_workerMessageWindow, kWindowTransitionValidationTimerId);
+        return;
+    }
     static constexpr UINT kValidationDelaysMs[] = {16, 64, 128, 256, 512, 1000};
     if (g_windowTransitionValidationAttempt >= ARRAYSIZE(kValidationDelaysMs)) {
         g_windowTransitionValidationAttempt = 0;
@@ -2339,11 +2375,18 @@ void SafeUnhookWinEvent(HWINEVENTHOOK& hook) {
 
 void InstallShellSurfaceHook() {
     SafeUnhookWinEvent(g_shellSurfaceHook);
+    SafeUnhookWinEvent(g_shellSurfaceCloakHook);
     g_shellSurfaceHook = SetWinEventHook(
         EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE, nullptr, WinEventProc,
         0, 0, WINEVENT_OUTOFCONTEXT);
     if (!g_shellSurfaceHook) {
         Wh_Log(L"Failed to install global shell surface WinEvent hook");
+    }
+    g_shellSurfaceCloakHook = SetWinEventHook(
+        EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED, nullptr, WinEventProc,
+        0, 0, WINEVENT_OUTOFCONTEXT);
+    if (!g_shellSurfaceCloakHook) {
+        Wh_Log(L"Failed to install global shell surface cloak WinEvent hook");
     }
 }
 
@@ -2464,6 +2507,98 @@ bool IsTaskbarMouseActivated(HWND hwnd) {
     return cursorOverTaskbar || IsAnyMouseButtonDown();
 }
 
+void ClearRecentlyDepartedApplication() {
+    g_recentlyDepartedApplicationWindow = nullptr;
+    g_recentlyDepartedApplicationProcessId = 0;
+    g_recentlyDepartedApplicationMonitor = nullptr;
+    g_recentlyDepartedApplicationTick = 0;
+}
+
+bool IsWindowsKeyDown() {
+    return (GetAsyncKeyState(VK_LWIN) & 0x8000) ||
+           (GetAsyncKeyState(VK_RWIN) & 0x8000);
+}
+
+bool IsRecentAutomaticTaskbarFocus(HWND taskbar, bool taskbarMouseActivated) {
+    if (!taskbar || GetForegroundWindow() != taskbar ||
+        taskbarMouseActivated || g_startMenuSessionActive ||
+        IsStartMenuCurrentlyVisible() || !g_recentlyDepartedApplicationTick ||
+        !g_recentlyDepartedApplicationProcessId) {
+        return false;
+    }
+
+    // Win+T/Win+B is explicit keyboard navigation. When the Windows key is
+    // still down, never classify the taskbar focus as an automatic close
+    // handoff even if it occurs immediately after an application closes.
+    if (IsWindowsKeyDown()) {
+        ClearRecentlyDepartedApplication();
+        return false;
+    }
+
+    const HMONITOR taskbarMonitor =
+        MonitorFromWindow(taskbar, MONITOR_DEFAULTTONEAREST);
+    // Automatic close-focus suppression is intentionally monitor-local. A
+    // taskbar on another display may be legitimately activated independently.
+    if (g_recentlyDepartedApplicationMonitor &&
+        taskbarMonitor != g_recentlyDepartedApplicationMonitor) {
+        return false;
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    if (now - g_recentlyDepartedApplicationTick >
+        kTaskbarAutomaticFocusSuppressMs) {
+        ClearRecentlyDepartedApplication();
+        return false;
+    }
+
+    const HWND departedWindow = g_recentlyDepartedApplicationWindow;
+    if (departedWindow && IsWindow(departedWindow)) {
+        DWORD processId = 0;
+        if (!GetWindowThreadProcessId(departedWindow, &processId) ||
+            processId != g_recentlyDepartedApplicationProcessId) {
+            ClearRecentlyDepartedApplication();
+            return false;
+        }
+
+        if (IsWindowVisible(departedWindow) &&
+            !IsWindowCloaked(departedWindow)) {
+            return false;
+        }
+    }
+
+    // The close target may already have been destroyed. In that case the
+    // stored process ID and monitor are the stable identity for this short
+    // handoff window; requiring GetWindowThreadProcessId on the dead HWND made
+    // automatic taskbar focus look like Win+T and left the taskbar visible.
+    return true;
+}
+
+bool IsShellSurfaceLifecycleEvent(DWORD event) {
+    return event == EVENT_OBJECT_SHOW || event == EVENT_OBJECT_HIDE ||
+           event == EVENT_OBJECT_CLOAKED || event == EVENT_OBJECT_UNCLOAKED;
+}
+
+bool IsShellSurfaceLifecycleShowEvent(DWORD event) {
+    return event == EVENT_OBJECT_SHOW || event == EVENT_OBJECT_UNCLOAKED;
+}
+
+void CompleteMinimizeTransitionForWindow(HWND hwnd) {
+    if (!hwnd || hwnd != g_minimizingWindow || !g_minimizeInProgress ||
+        !IsIconic(hwnd)) {
+        return;
+    }
+
+    // MINIMIZEEND is the restore event, not the completion of minimizing.
+    // Mark the minimize transition complete as soon as the target is actually
+    // minimized so keyboard taskbar navigation is not blocked until restore.
+    g_minimizeInProgress = false;
+    g_lastMinimizeTransitionTick = GetTickCount64();
+    if (g_workerMessageWindow) {
+        SetTimer(g_workerMessageWindow, kPostMinimizeReassertTimerId, 1200,
+                 nullptr);
+    }
+}
+
 void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD, DWORD) {
     if (event == EVENT_OBJECT_FOCUS) {
         if (!hwnd) return;
@@ -2489,7 +2624,20 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
         if (root == hwnd && idObject == OBJID_WINDOW && idChild == CHILDID_SELF) return;
         if (g_minimizeInProgress || IsAnyMouseButtonDown()) return;
         if (g_startMenuSessionActive || IsStartMenuCurrentlyVisible()) return;
+        const bool mouseActivated = IsTaskbarMouseActivated(root);
+        if (!mouseActivated && IsWindowsKeyDown()) {
+            // A real Win+T/Win+B activation must win over the short close
+            // handoff suppression, including arrow-key navigation that follows.
+            ClearRecentlyDepartedApplication();
+        }
         HWND foreground = GetForegroundWindow();
+        if (foreground == root &&
+            IsRecentAutomaticTaskbarFocus(root, mouseActivated)) {
+            CancelKeyboardTaskbarReleaseTimer();
+            g_taskbarForegroundKeyboardActivated = false;
+            g_keyboardTaskbarWindow = nullptr;
+            return;
+        }
         if (foreground && foreground != root) {
             WCHAR foregroundClass[256] = {};
             if (GetClassNameW(
@@ -2534,8 +2682,8 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
             hwnd == g_foregroundLocationWindow && hwnd == GetForegroundWindow();
         const bool minimizeTransitionActive =
             g_minimizeInProgress ||
-            (g_lastMinimizeEventTick != 0 &&
-             GetTickCount64() - g_lastMinimizeEventTick < 1000);
+            (g_lastMinimizeTransitionTick != 0 &&
+             GetTickCount64() - g_lastMinimizeTransitionTick < 1000);
         if (foregroundLocationEvent && !minimizeTransitionActive) {
             g_foregroundTransitionWindow = hwnd;
             g_foregroundTransitionMonitor =
@@ -2547,11 +2695,12 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
         if (ownerFound || foregroundLocationEvent) PostRefresh();
         return;
     }
-    if ((event == EVENT_OBJECT_SHOW || event == EVENT_OBJECT_HIDE) &&
-        IsTaskbarWindow(hwnd)) {
-        if (event == EVENT_OBJECT_SHOW) {
-            MonitorList monitors = GetCurrentMonitors();
-            RefreshWindowsAnimationsCloseGuard(monitors);
+    // Shell surfaces may transition through visibility or DWM cloak state.
+    // Treat both forms as lifecycle changes so Start/Search can close without
+    // waiting for an unrelated foreground or safety-poll event.
+    if (IsShellSurfaceLifecycleEvent(event) && IsTaskbarWindow(hwnd)) {
+        if (IsShellSurfaceLifecycleShowEvent(event)) {
+            RefreshWindowsAnimationsCloseGuard();
             size_t taskbarIndex = 0;
             if (IsTrackedTaskbar(hwnd, &taskbarIndex) &&
                 g_taskbarStates[taskbarIndex].hiddenByMod) {
@@ -2562,11 +2711,30 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
         PostRefresh();
         return;
     }
-    if (event == EVENT_OBJECT_SHOW || event == EVENT_OBJECT_HIDE) {
+    if (IsShellSurfaceLifecycleEvent(event)) {
+        if (event == EVENT_OBJECT_HIDE && hwnd) {
+            const HWND root = GetAncestor(hwnd, GA_ROOT);
+            if (root && root == g_lastForegroundApplicationWindow) {
+                g_recentlyDepartedApplicationWindow = root;
+                g_recentlyDepartedApplicationProcessId = 0;
+                GetWindowThreadProcessId(
+                    root, &g_recentlyDepartedApplicationProcessId);
+                g_recentlyDepartedApplicationMonitor =
+                    MonitorFromWindow(root, MONITOR_DEFAULTTONEAREST);
+                g_recentlyDepartedApplicationTick = GetTickCount64();
+            }
+        }
+        if (event == EVENT_OBJECT_HIDE && hwnd &&
+            hwnd == g_minimizingWindow && IsIconic(hwnd)) {
+            CompleteMinimizeTransitionForWindow(hwnd);
+        }
+        if (event == EVENT_OBJECT_SHOW && hwnd &&
+            GetPropW(hwnd, kWindowsAnimationsAnimationGhostProp)) {
+            ArmWindowsAnimationsCloseProbeTimer();
+        }
         WCHAR className[256] = {};
         if (!hwnd || GetClassNameW(hwnd, className, ARRAYSIZE(className)) == 0) return;
         if (!IsShellSurfaceCandidateClass(className)) return;
-        ArmWindowsAnimationsCloseProbeTimer();
         DWORD pid = 0;
         GetWindowThreadProcessId(hwnd, &pid);
         ShellProcessKindCache processCache = {};
@@ -2578,15 +2746,16 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
             !IsShellSurfaceEventWindow(hwnd, className, processKind)) {
             return;
         }
+        const bool showLikeEvent = IsShellSurfaceLifecycleShowEvent(event);
         if (isStartMenu) {
-            if (event == EVENT_OBJECT_SHOW) {
+            if (showLikeEvent) {
                 g_startMenuSessionActive = true;
                 g_startMenuSessionWindow = hwnd;
                 g_taskbarForegroundKeyboardActivated = false;
                 g_keyboardTaskbarWindow = nullptr;
                 CancelKeyboardTaskbarReleaseTimer();
                 g_taskbarForegroundAfterShell = false;
-                g_lastMinimizeEventTick = 0;
+                g_lastMinimizeTransitionTick = 0;
             } else {
                 if (!g_startMenuSessionWindow ||
                     g_startMenuSessionWindow == hwnd) {
@@ -2597,19 +2766,17 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
                 g_keyboardTaskbarWindow = nullptr;
                 CancelKeyboardTaskbarReleaseTimer();
                 g_taskbarForegroundAfterShell = false;
-                g_lastMinimizeEventTick = 0;
+                g_lastMinimizeTransitionTick = 0;
                 g_windowTransitionValidationAttempt = 0;
                 ArmWindowTransitionValidation();
             }
             PostRefresh();
             return;
         }
-        if (event == EVENT_OBJECT_SHOW) {
+        if (showLikeEvent) {
             g_taskbarForegroundAfterShell = false;
-        } else {
-            if (!g_taskbarForegroundKeyboardActivated) {
-                g_taskbarForegroundAfterShell = true;
-            }
+        } else if (!g_taskbarForegroundKeyboardActivated) {
+            g_taskbarForegroundAfterShell = true;
         }
         PostRefresh();
         return;
@@ -2654,7 +2821,6 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
         if (isFullscreenOwner) {
             ClearFullscreenOwnersForWindow(hwnd);
         }
-        ArmWindowsAnimationsCloseProbeTimer();
         if (hwnd == g_foregroundLocationWindow) {
             InstallForegroundLocationHook(nullptr);
         }
@@ -2699,12 +2865,25 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
         return;
     }
     if (event == EVENT_SYSTEM_FOREGROUND) {
-        ArmWindowsAnimationsCloseProbeTimer();
         WCHAR foregroundClassName[256] = {};
         if (hwnd) GetClassNameW(hwnd, foregroundClassName, ARRAYSIZE(foregroundClassName));
+        if (g_minimizeInProgress && g_minimizingWindow) {
+            if (hwnd == g_minimizingWindow && !IsIconic(hwnd)) {
+                // MINIMIZEEND starts the restore transition. Once the restored
+                // application actually becomes foreground, that transition is done.
+                g_minimizeInProgress = false;
+                g_lastMinimizeTransitionTick = GetTickCount64();
+                if (g_workerMessageWindow) {
+                    SetTimer(g_workerMessageWindow, kPostMinimizeReassertTimerId,
+                             1200, nullptr);
+                }
+            } else if (hwnd != g_minimizingWindow && IsIconic(g_minimizingWindow)) {
+                CompleteMinimizeTransitionForWindow(g_minimizingWindow);
+            }
+        }
         const bool postMinimizeTaskbarForeground =
-            g_lastMinimizeEventTick != 0 &&
-            GetTickCount64() - g_lastMinimizeEventTick < 1000;
+            g_lastMinimizeTransitionTick != 0 &&
+            GetTickCount64() - g_lastMinimizeTransitionTick < 1000;
         const bool minimizeTransitionActive =
             g_minimizeInProgress || postMinimizeTaskbarForeground;
         bool isTaskbarForeground = false;
@@ -2749,6 +2928,7 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
             }
             if (foregroundIsApplication &&
                 hwnd != g_lastForegroundApplicationWindow) {
+                ClearRecentlyDepartedApplication();
                 g_previousForegroundApplicationWindow =
                     g_lastForegroundApplicationWindow;
                 g_previousForegroundApplicationMonitor =
@@ -2787,8 +2967,6 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
                     Wh_Log(L"Fullscreen validation timer could not be armed");
                 }
             }
-            g_windowTransitionValidationAttempt = 0;
-            ArmWindowTransitionValidation();
             const bool transitionAlreadyActive =
                 IsForegroundTransitionHoldActive(g_foregroundTransitionMonitor);
             const bool isDesktopInfrastructure =
@@ -2807,6 +2985,8 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
                 g_foregroundTransitionMonitor = nullptr;
                 g_foregroundTransitionDeadline = 0;
             }
+            g_windowTransitionValidationAttempt = 0;
+            ArmWindowTransitionValidation();
             PostRefresh();
             return;
         }
@@ -2814,22 +2994,38 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
         g_lastForegroundWasShellSurface = false;
         CancelKeyboardTaskbarReleaseTimer();
         InstallForegroundLocationHook(nullptr);
+        const bool mouseActivated = IsTaskbarMouseActivated(hwnd);
+        const bool windowsKeyDown = !mouseActivated && IsWindowsKeyDown();
         if (g_minimizeInProgress ||
-            (postMinimizeTaskbarForeground && isTaskbarForeground)) {
+            (postMinimizeTaskbarForeground && isTaskbarForeground &&
+             !windowsKeyDown)) {
             g_taskbarForegroundKeyboardActivated = false;
             g_taskbarForegroundAfterShell = false;
             PostRefresh();
             return;
         }
-        const bool mouseActivated = IsTaskbarMouseActivated(hwnd);
-        const bool keyboardActivated = g_taskbarForegroundKeyboardActivated && !mouseActivated;
-        g_taskbarForegroundKeyboardActivated = keyboardActivated;
-        if (keyboardActivated) {
-            g_keyboardTaskbarWindow = hwnd;
-        } else if (g_keyboardTaskbarWindow == hwnd) {
-            g_keyboardTaskbarWindow = nullptr;
+        if (windowsKeyDown) {
+            ClearRecentlyDepartedApplication();
         }
-        g_taskbarForegroundAfterShell = wasShellForeground && !mouseActivated && !keyboardActivated;
+        const bool automaticTaskbarFocus =
+            !mouseActivated &&
+            IsRecentAutomaticTaskbarFocus(hwnd, mouseActivated);
+        if (automaticTaskbarFocus) {
+            g_taskbarForegroundKeyboardActivated = false;
+            g_keyboardTaskbarWindow = nullptr;
+            g_taskbarForegroundAfterShell = false;
+        } else {
+            const bool keyboardActivated =
+                g_taskbarForegroundKeyboardActivated && !mouseActivated;
+            g_taskbarForegroundKeyboardActivated = keyboardActivated;
+            if (keyboardActivated) {
+                g_keyboardTaskbarWindow = hwnd;
+            } else if (g_keyboardTaskbarWindow == hwnd) {
+                g_keyboardTaskbarWindow = nullptr;
+            }
+            g_taskbarForegroundAfterShell =
+                wasShellForeground && !mouseActivated && !keyboardActivated;
+        }
         if (mouseActivated) {
             const HMONITOR taskbarMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
             if (taskbarMonitor) {
@@ -2845,14 +3041,13 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
         return;
     }
     if (event == EVENT_SYSTEM_MINIMIZESTART) {
-        ArmWindowsAnimationsCloseProbeTimer();
         if (hwnd && hwnd == g_foregroundTransitionWindow) {
             g_foregroundTransitionWindow = nullptr;
         }
         ArmTaskbarIntegrityGuard();
         g_minimizeInProgress = true;
         g_minimizingWindow = hwnd;
-        g_lastMinimizeEventTick = GetTickCount64();
+        g_lastMinimizeTransitionTick = GetTickCount64();
         CancelKeyboardTaskbarReleaseTimer();
         g_taskbarForegroundKeyboardActivated = false;
         g_keyboardTaskbarWindow = nullptr;
@@ -2867,10 +3062,12 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
         return;
     }
     if (event == EVENT_SYSTEM_MINIMIZEEND) {
-        ArmWindowsAnimationsCloseProbeTimer();
+        // MINIMIZEEND is emitted when the window is about to be restored. Keep
+        // transition protection active until the restored foreground event arrives.
         ArmTaskbarIntegrityGuard();
-        g_minimizeInProgress = false;
-        g_lastMinimizeEventTick = GetTickCount64();
+        g_minimizeInProgress = hwnd != nullptr;
+        g_minimizingWindow = hwnd;
+        g_lastMinimizeTransitionTick = GetTickCount64();
         CancelKeyboardTaskbarReleaseTimer();
         g_keyboardTaskbarWindow = nullptr;
         g_hoverActive = false;
@@ -2897,7 +3094,6 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
         return;
     }
     if (event == EVENT_SYSTEM_MOVESIZESTART) {
-        ArmWindowsAnimationsCloseProbeTimer();
         if (hwnd && hwnd == GetForegroundWindow()) {
             ArmTaskbarIntegrityGuard();
             g_foregroundTransitionWindow = hwnd;
@@ -2910,7 +3106,6 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
         return;
     }
     if (event == EVENT_SYSTEM_MOVESIZEEND) {
-        ArmWindowsAnimationsCloseProbeTimer();
         if (hwnd && hwnd == GetForegroundWindow()) {
             ArmTaskbarIntegrityGuard();
         }
@@ -2940,7 +3135,7 @@ LRESULT CALLBACK WorkerMessageWindowProc(HWND hwnd, UINT message, WPARAM wParam,
     }
     if (message == WM_TIMER && wParam == kPostMinimizeReassertTimerId) {
         KillTimer(hwnd, kPostMinimizeReassertTimerId);
-        g_lastMinimizeEventTick = 0;
+        g_lastMinimizeTransitionTick = 0;
         g_minimizingWindow = nullptr;
         g_minimizeInProgress = false;
         g_taskbarForegroundKeyboardActivated = false;
@@ -2950,8 +3145,7 @@ LRESULT CALLBACK WorkerMessageWindowProc(HWND hwnd, UINT message, WPARAM wParam,
     }
     if (message == WM_TIMER && wParam == kWindowsAnimationsCloseProbeTimerId) {
         const bool wasActive = g_windowsAnimationsCloseActive;
-        MonitorList monitors = GetCurrentMonitors();
-        const bool closeActive = RefreshWindowsAnimationsCloseGuard(monitors);
+        const bool closeActive = RefreshWindowsAnimationsCloseGuard();
         if (closeActive != wasActive) {
             UpdateTaskbarState();
         }
@@ -2965,10 +3159,7 @@ LRESULT CALLBACK WorkerMessageWindowProc(HWND hwnd, UINT message, WPARAM wParam,
             closeGuardGraceActive ||
             (g_windowsAnimationsCloseProbeDeadline != 0 &&
              now < g_windowsAnimationsCloseProbeDeadline);
-        if (keepProbeRunning) {
-            SetTimer(hwnd, kWindowsAnimationsCloseProbeTimerId,
-                     kWindowsAnimationsCloseProbeIntervalMs, nullptr);
-        } else {
+        if (!keepProbeRunning) {
             CancelWindowsAnimationsCloseProbeTimer();
         }
         return 0;
@@ -2985,13 +3176,12 @@ LRESULT CALLBACK WorkerMessageWindowProc(HWND hwnd, UINT message, WPARAM wParam,
             CancelTaskbarIntegrityGuard();
             return 0;
         }
-        SetTimer(hwnd, kTaskbarIntegrityTimerId, 8, nullptr);
         return 0;
     }
     if (message == WM_TIMER && wParam == kWindowTransitionValidationTimerId) {
         KillTimer(hwnd, kWindowTransitionValidationTimerId);
         UpdateTaskbarState();
-        if (g_windowTransitionValidationAttempt < 6) {
+        if (IsWindowTransitionValidationActive()) {
             ArmWindowTransitionValidation();
         } else {
             g_windowTransitionValidationAttempt = 0;
@@ -3202,6 +3392,7 @@ DWORD WINAPI WorkerThread(LPVOID) {
     }
     g_lastForegroundApplicationWindow = nullptr;
     g_lastForegroundApplicationMonitor = nullptr;
+    ClearRecentlyDepartedApplication();
     g_previousForegroundApplicationWindow = nullptr;
     g_previousForegroundApplicationMonitor = nullptr;
     g_fullscreenValidationAttempt = 0;
@@ -3218,6 +3409,7 @@ DWORD WINAPI WorkerThread(LPVOID) {
     SafeUnhookWinEvent(g_moveHook);
     for (size_t i = 0; i < kMaxMonitorNumbers; ++i) SafeUnhookWinEvent(g_fullscreenLocationHooks[i]);
     SafeUnhookWinEvent(g_shellSurfaceHook);
+    SafeUnhookWinEvent(g_shellSurfaceCloakHook);
     SafeUnhookWinEvent(g_taskbarFocusHook);
     SafeUnhookWinEvent(g_windowDestroyHook);
     SafeUnhookWinEvent(g_foregroundLocationHook);
@@ -3411,6 +3603,20 @@ void WhTool_ModUninit() {
     SafeCloseHandle(g_workerReadyEvent);
     RestoreAllTaskbars();
 }
+////////////////////////////////////////////////////////////////////////////////
+// Windhawk tool mod implementation for mods which don't need to inject to other
+// processes or hook other functions. Context:
+// https://github.com/ramensoftware/windhawk/wiki/Mods-as-tools:-Running-mods-in-a-dedicated-process
+//
+// The mod will load and run in a dedicated windhawk.exe process.
+//
+// Paste the code below as part of the mod code, and use these callbacks:
+// * WhTool_ModInit
+// * WhTool_ModSettingsChanged
+// * WhTool_ModUninit
+//
+// Currently, other callbacks are not supported.
+
 bool g_isToolModProcessLauncher;
 HANDLE g_toolModProcessMutex;
 
@@ -3425,6 +3631,7 @@ BOOL Wh_ModInit() {
         sessionId == 0) {
         return FALSE;
     }
+
     bool isExcluded = false;
     bool isToolModProcess = false;
     bool isCurrentToolModProcess = false;
@@ -3434,6 +3641,7 @@ BOOL Wh_ModInit() {
         Wh_Log(L"CommandLineToArgvW failed");
         return FALSE;
     }
+
     for (int i = 1; i < argc; i++) {
         if (wcscmp(argv[i], L"-service") == 0 ||
             wcscmp(argv[i], L"-service-start") == 0 ||
@@ -3442,6 +3650,7 @@ BOOL Wh_ModInit() {
             break;
         }
     }
+
     for (int i = 1; i < argc - 1; i++) {
         if (wcscmp(argv[i], L"-tool-mod") == 0) {
             isToolModProcess = true;
@@ -3451,10 +3660,13 @@ BOOL Wh_ModInit() {
             break;
         }
     }
+
     LocalFree(argv);
+
     if (isExcluded) {
         return FALSE;
     }
+
     if (isCurrentToolModProcess) {
         g_toolModProcessMutex =
             CreateMutex(nullptr, TRUE, L"windhawk-tool-mod_" WH_MOD_ID);
@@ -3462,25 +3674,32 @@ BOOL Wh_ModInit() {
             Wh_Log(L"CreateMutex failed");
             ExitProcess(1);
         }
+
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
             Wh_Log(L"Tool mod already running (%s)", WH_MOD_ID);
             ExitProcess(1);
         }
+
         if (!WhTool_ModInit()) {
             ExitProcess(1);
         }
+
         IMAGE_DOS_HEADER* dosHeader =
             (IMAGE_DOS_HEADER*)GetModuleHandle(nullptr);
         IMAGE_NT_HEADERS* ntHeaders =
             (IMAGE_NT_HEADERS*)((BYTE*)dosHeader + dosHeader->e_lfanew);
+
         DWORD entryPointRVA = ntHeaders->OptionalHeader.AddressOfEntryPoint;
         void* entryPoint = (BYTE*)dosHeader + entryPointRVA;
+
         Wh_SetFunctionHook(entryPoint, (void*)EntryPoint_Hook, nullptr);
         return TRUE;
     }
+
     if (isToolModProcess) {
         return FALSE;
     }
+
     g_isToolModProcessLauncher = true;
     return TRUE;
 }
@@ -3489,6 +3708,7 @@ void Wh_ModAfterInit() {
     if (!g_isToolModProcessLauncher) {
         return;
     }
+
     WCHAR currentProcessPath[MAX_PATH];
     switch (GetModuleFileName(nullptr, currentProcessPath,
                               ARRAYSIZE(currentProcessPath))) {
@@ -3497,11 +3717,22 @@ void Wh_ModAfterInit() {
             Wh_Log(L"GetModuleFileName failed");
             return;
     }
+
     WCHAR
     commandLine[MAX_PATH + 2 +
                 (sizeof(L" -tool-mod \"" WH_MOD_ID "\"") / sizeof(WCHAR)) - 1];
     swprintf_s(commandLine, L"\"%s\" -tool-mod \"%s\"", currentProcessPath,
                WH_MOD_ID);
+
+    HMODULE kernelModule = GetModuleHandle(L"kernelbase.dll");
+    if (!kernelModule) {
+        kernelModule = GetModuleHandle(L"kernel32.dll");
+        if (!kernelModule) {
+            Wh_Log(L"No kernelbase.dll/kernel32.dll");
+            return;
+        }
+    }
+
     using CreateProcessInternalW_t = BOOL(WINAPI*)(
         HANDLE hUserToken, LPCWSTR lpApplicationName, LPWSTR lpCommandLine,
         LPSECURITY_ATTRIBUTES lpProcessAttributes,
@@ -3510,38 +3741,26 @@ void Wh_ModAfterInit() {
         LPSTARTUPINFOW lpStartupInfo,
         LPPROCESS_INFORMATION lpProcessInformation,
         PHANDLE hRestrictedUserToken);
-    CreateProcessInternalW_t pCreateProcessInternalW = nullptr;
-    HMODULE kernelModule = GetModuleHandle(L"kernelbase.dll");
-    if (!kernelModule) {
-        kernelModule = GetModuleHandle(L"kernel32.dll");
+    CreateProcessInternalW_t pCreateProcessInternalW =
+        (CreateProcessInternalW_t)GetProcAddress(kernelModule,
+                                                 "CreateProcessInternalW");
+    if (!pCreateProcessInternalW) {
+        Wh_Log(L"No CreateProcessInternalW");
+        return;
     }
-    if (kernelModule) {
-        pCreateProcessInternalW =
-            (CreateProcessInternalW_t)GetProcAddress(kernelModule,
-                                                     "CreateProcessInternalW");
-    }
+
     STARTUPINFO si{
         .cb = sizeof(STARTUPINFO),
         .dwFlags = STARTF_FORCEOFFFEEDBACK,
     };
-    PROCESS_INFORMATION pi{};
-    BOOL created = FALSE;
-    if (pCreateProcessInternalW) {
-        created = pCreateProcessInternalW(
-            nullptr, currentProcessPath, commandLine,
-            nullptr, nullptr, FALSE, NORMAL_PRIORITY_CLASS,
-            nullptr, nullptr, &si, &pi, nullptr);
-    } else {
-        Wh_Log(L"CreateProcessInternalW unavailable; using documented CreateProcessW fallback");
-        created = CreateProcessW(
-            currentProcessPath, commandLine,
-            nullptr, nullptr, FALSE, NORMAL_PRIORITY_CLASS,
-            nullptr, nullptr, &si, &pi);
-    }
-    if (!created) {
+    PROCESS_INFORMATION pi;
+    if (!pCreateProcessInternalW(nullptr, currentProcessPath, commandLine,
+                                 nullptr, nullptr, FALSE, NORMAL_PRIORITY_CLASS,
+                                 nullptr, nullptr, &si, &pi, nullptr)) {
         Wh_Log(L"CreateProcess failed");
         return;
     }
+
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 }
@@ -3550,6 +3769,7 @@ void Wh_ModSettingsChanged() {
     if (g_isToolModProcessLauncher) {
         return;
     }
+
     WhTool_ModSettingsChanged();
 }
 
@@ -3557,6 +3777,7 @@ void Wh_ModUninit() {
     if (g_isToolModProcessLauncher) {
         return;
     }
+
     WhTool_ModUninit();
     ExitProcess(0);
 }
